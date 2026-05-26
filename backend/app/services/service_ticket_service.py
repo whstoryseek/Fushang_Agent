@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.core.config import settings
 from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -12,9 +13,9 @@ INTENT_MISSING_KNOWLEDGE = "B"
 INTENT_AMBIGUOUS = "C"
 INTENT_NORMAL = "D"
 
-CLASSIFIER_MODEL = "doubao-seed-2-0-mini-260428"
+CLASSIFIER_MODEL = getattr(settings, "operation_classifier_model", "doubao-seed-2-0-mini-260428")
 CLASSIFIER_MAX_TOKENS = 300
-CLASSIFIER_TIMEOUT = 1.2
+CLASSIFIER_TIMEOUT = min(float(getattr(settings, "operation_classifier_timeout", 1.2)), 1.2)
 
 _VALID_INTENTS = {
     INTENT_OPERATION,
@@ -25,7 +26,7 @@ _VALID_INTENTS = {
 
 
 def _fallback_decision(query: str, has_image: bool) -> Dict[str, Any]:
-    if has_image and not (query or "").strip():
+    if has_image or not (query or "").strip():
         return {
             "intent_class": INTENT_AMBIGUOUS,
             "reason": "ambiguous_query",
@@ -72,7 +73,21 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
-def _normalize_payload(payload: Dict[str, Any], query: str, has_image: bool) -> Dict[str, Any]:
+def _rag_result_proves_miss(rag_result: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(rag_result, dict):
+        return False
+    if not rag_result.get("used_fallback"):
+        return False
+    fallback_reason = str(rag_result.get("fallback_reason") or "").lower()
+    return "no_relevant" in fallback_reason or rag_result.get("quality_passed") is False
+
+
+def _normalize_payload(
+    payload: Dict[str, Any],
+    query: str,
+    has_image: bool,
+    rag_result: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
     intent = str(payload.get("intent_class") or "").strip().upper()
     if intent not in _VALID_INTENTS:
         return _fallback_decision(query, has_image)
@@ -80,7 +95,9 @@ def _normalize_payload(payload: Dict[str, Any], query: str, has_image: bool) -> 
     needs_ticket_flow = bool(payload.get("needs_ticket_flow"))
     if intent == INTENT_NORMAL:
         needs_ticket_flow = False
-    elif intent in {INTENT_OPERATION, INTENT_MISSING_KNOWLEDGE, INTENT_AMBIGUOUS}:
+    elif intent == INTENT_MISSING_KNOWLEDGE:
+        needs_ticket_flow = _rag_result_proves_miss(rag_result)
+    elif intent in {INTENT_OPERATION, INTENT_AMBIGUOUS}:
         needs_ticket_flow = True
 
     fields = payload.get("fields")
@@ -170,7 +187,7 @@ def classify_ticket_intent_with_llm(
             max_retries=0,
         )
         payload = _extract_json_payload(text)
-        return _normalize_payload(payload, query, has_image)
+        return _normalize_payload(payload, query, has_image, rag_result)
     except Exception as exc:
         logger.warning("ticket intent classifier failed: %s", exc)
         return _fallback_decision(query, has_image)
