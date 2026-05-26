@@ -13,9 +13,19 @@ if "psycopg2" not in sys.modules:
     sys.modules["psycopg2.extras"] = psycopg2_module.extras
 
 from app.db.service_ticket_repository import ServiceTicketRepository
+from app.db import init_db
 
 
 class ServiceTicketRepositoryTests(unittest.TestCase):
+    def test_init_db_includes_service_ticket_tables_and_indexes(self):
+        schema = "\n".join(init_db._TABLES)
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS service_ticket", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS service_ticket_context", schema)
+        self.assertIn("idx_service_ticket_status", schema)
+        self.assertIn("idx_service_ticket_context_ticket", schema)
+        self.assertIn("clarification JSONB NOT NULL DEFAULT '{}'", schema)
+
     def test_create_with_contexts_persists_ticket_and_context_rows(self):
         repo = ServiceTicketRepository()
 

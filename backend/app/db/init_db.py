@@ -190,7 +190,62 @@ _TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_unanswered_created ON unanswered_question(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_unanswered_kb ON unanswered_question(kb_name, created_at DESC)",
 
-    # 12. 本地文件存储（替代 OSS）
+    # 12. 服务记录 / 工单（每次店长提问均记录）
+    """
+    CREATE TABLE IF NOT EXISTS service_ticket (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id      UUID,
+        user_id         TEXT NOT NULL DEFAULT 'guest_default',
+        user_name       TEXT,
+        kb_name         TEXT,
+        query           TEXT NOT NULL,
+        answer          TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending_manual',
+        confidence      FLOAT,
+        fallback_reason TEXT,
+        quality_level   TEXT,
+        sources         JSONB NOT NULL DEFAULT '[]',
+        channel         TEXT NOT NULL DEFAULT 'web',
+        processing_ms   FLOAT,
+        sender_id       TEXT,
+        requester_name  TEXT,
+        clarification_round INTEGER NOT NULL DEFAULT 0,
+        clarification   JSONB NOT NULL DEFAULT '{}',
+        note            TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        resolved_at     TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_status ON service_ticket(status, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_user ON service_ticket(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_kb ON service_ticket(kb_name, created_at DESC)",
+    "ALTER TABLE service_ticket ALTER COLUMN session_id TYPE TEXT USING session_id::text",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS note TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS sender_id TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS requester_name TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS clarification_round INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS clarification JSONB NOT NULL DEFAULT '{}'",
+    """
+    CREATE TABLE IF NOT EXISTS service_ticket_context (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ticket_id   UUID NOT NULL REFERENCES service_ticket(id) ON DELETE CASCADE,
+        chunk_id    UUID,
+        job_id      UUID,
+        file_name   TEXT,
+        chunk_index INTEGER,
+        score       FLOAT,
+        content     TEXT NOT NULL DEFAULT '',
+        metadata    JSONB NOT NULL DEFAULT '{}',
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_context_ticket ON service_ticket_context(ticket_id, sort_order)",
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_context_chunk ON service_ticket_context(chunk_id)",
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_context_job ON service_ticket_context(job_id)",
+
+    # 13. 本地文件存储（替代 OSS）
     """
     CREATE TABLE IF NOT EXISTS file_storage (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -203,7 +258,7 @@ _TABLES = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_file_storage_key ON file_storage(file_key)",
 
-    # 13. 本地认证用户（当前仅管理员）
+    # 14. 本地认证用户（当前仅管理员）
     """
     CREATE TABLE IF NOT EXISTS auth_user (
         id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
