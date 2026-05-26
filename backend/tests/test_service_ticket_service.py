@@ -6,7 +6,11 @@ from app.services.service_ticket_service import (
     INTENT_AMBIGUOUS,
     INTENT_MISSING_KNOWLEDGE,
     INTENT_OPERATION,
+    _exit_reason_for_round_cap,
+    _intent_class_for_reason,
+    _is_complete,
     _is_user_refusal,
+    _max_rounds_for_intent,
     build_context_snapshots,
     classify_operation_query_with_llm,
     classify_ticket_status,
@@ -469,6 +473,19 @@ class ServiceTicketServiceTests(unittest.TestCase):
                 self.assertTrue(_is_user_refusal(query))
 
         self.assertFalse(_is_user_refusal("手机号 13800138000，门店是A店"))
+        self.assertFalse(_is_user_refusal("手机号不知道，门店是A店，截图已传"))
+
+    def test_intent_helper_contracts_include_missing_knowledge_class(self):
+        self.assertEqual(_intent_class_for_reason("knowledge_missing"), INTENT_MISSING_KNOWLEDGE)
+        self.assertEqual(_intent_class_for_reason("ambiguous_query"), INTENT_AMBIGUOUS)
+        self.assertEqual(_intent_class_for_reason("operation_required"), INTENT_OPERATION)
+        self.assertEqual(_max_rounds_for_intent(INTENT_MISSING_KNOWLEDGE), 5)
+        self.assertEqual(_max_rounds_for_intent(INTENT_AMBIGUOUS), 3)
+        self.assertEqual(_max_rounds_for_intent(INTENT_OPERATION), 20)
+        self.assertFalse(_is_complete(INTENT_MISSING_KNOWLEDGE, []))
+        self.assertTrue(_is_complete(INTENT_OPERATION, []))
+        self.assertEqual(_exit_reason_for_round_cap(INTENT_MISSING_KNOWLEDGE), "max_rounds")
+        self.assertEqual(_exit_reason_for_round_cap(INTENT_AMBIGUOUS), "semantic_unresolved")
 
     @patch("app.services.service_ticket_service.get_service_ticket_repository")
     def test_no_workflow_operation_finalizes_manual_ticket_immediately(self, mock_repo):
@@ -675,6 +692,44 @@ class ServiceTicketServiceTests(unittest.TestCase):
         self.assertFalse(should_skip)
         self.assertFalse(non_fallback_no_relevant)
         self.assertFalse(non_fallback_low_confidence)
+
+    def test_missing_knowledge_flow_is_defensive_for_malformed_inputs(self):
+        self.assertFalse(should_start_missing_knowledge_flow(None))
+        self.assertFalse(should_start_missing_knowledge_flow("no_relevant_knowledge"))
+        self.assertFalse(should_start_missing_knowledge_flow({}))
+        self.assertFalse(
+            should_start_missing_knowledge_flow(
+                {
+                    "used_fallback": True,
+                    "fallback_reason": "",
+                    "quality_passed": True,
+                    "confidence": "",
+                    "sources": [],
+                }
+            )
+        )
+        self.assertFalse(
+            should_start_missing_knowledge_flow(
+                {
+                    "used_fallback": True,
+                    "fallback_reason": "",
+                    "quality_passed": True,
+                    "confidence": "low",
+                    "sources": [],
+                }
+            )
+        )
+        self.assertTrue(
+            should_start_missing_knowledge_flow(
+                {
+                    "used_fallback": True,
+                    "fallback_reason": "no_relevant_knowledge",
+                    "quality_passed": False,
+                    "confidence": "low",
+                    "sources": [],
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

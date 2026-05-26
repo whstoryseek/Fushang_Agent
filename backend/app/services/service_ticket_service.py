@@ -107,11 +107,21 @@ def _is_knowledge_help_question(text: str) -> bool:
 _REFUSAL_RE = re.compile(
     r"(不想回答|不用问|别问|不知道|不清楚|无法提供|没法提供|没有更多|没有其他|直接处理|直接提交|你们处理|人工处理)"
 )
+_REFUSAL_STOP_RE = re.compile(r"(不想回答|不用问|别问|直接处理|直接提交|你们处理|人工处理)")
+_USEFUL_INFO_RE = re.compile(
+    r"(手机号|手机|电话|门店|店铺|账号|账户|截图|图片|已传|上传|身份证|证件|138\d{8}|1[3-9]\d{9})"
+)
 
 
 def _is_user_refusal(query: str) -> bool:
     text = " ".join((query or "").strip().split())
-    return bool(text and _REFUSAL_RE.search(text))
+    if not text or not _REFUSAL_RE.search(text):
+        return False
+    if _REFUSAL_STOP_RE.search(text):
+        return True
+    if _USEFUL_INFO_RE.search(text):
+        return False
+    return True
 
 
 def _intent_class_for_reason(reason: str) -> str:
@@ -141,6 +151,8 @@ def _exit_reason_for_round_cap(intent_class: str) -> str:
 
 
 def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
+    if not isinstance(rag_result, dict):
+        return False
     if not rag_result.get("used_fallback"):
         return False
     fallback_reason = str(rag_result.get("fallback_reason") or "").lower()
@@ -160,7 +172,11 @@ def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
     )
     if no_relevant_reason or rag_result.get("quality_passed") is False:
         return True
-    if confidence is not None and float(confidence) < 0.35 and not sources:
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        return False
+    if confidence_value < 0.35 and not sources:
         return True
     return False
 
