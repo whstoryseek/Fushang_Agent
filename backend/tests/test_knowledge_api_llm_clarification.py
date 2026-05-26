@@ -173,6 +173,7 @@ class KnowledgeApiLlmClarificationTests(unittest.IsolatedAsyncioTestCase):
             "thoughts": {},
             "image_map": None,
             "finish_reason": "stop",
+            "kb_name": "\u5bcc\u53cb\u6807\u51c6\u77e5\u8bc6\u5e93",
         }
 
         response = await knowledge.knowledge_qa(
@@ -186,6 +187,7 @@ class KnowledgeApiLlmClarificationTests(unittest.IsolatedAsyncioTestCase):
         mock_invoke_rag.assert_awaited_once()
         self.assertFalse(mock_invoke_rag.call_args.kwargs["persist"])
         mock_persist_messages.assert_called_once()
+        self.assertEqual(mock_persist_messages.call_args.kwargs["kb_name"], "\u5bcc\u53cb\u6807\u51c6\u77e5\u8bc6\u5e93")
 
     @patch("app.api.v1.knowledge.start_missing_knowledge_clarification")
     @patch("app.api.v1.knowledge.invoke_knowledge_qa", new_callable=AsyncMock)

@@ -865,10 +865,17 @@ def start_missing_knowledge_clarification(
         "workflow_sources": [],
         "fallback_used": True,
         "kb_result": {
+            "request_id": rag_result.get("request_id"),
             "hit": False,
             "fallback_reason": rag_result.get("fallback_reason"),
             "confidence": rag_result.get("confidence"),
             "answer": rag_result.get("answer"),
+            "sources": rag_result.get("sources") or [],
+            "model": rag_result.get("model"),
+            "thoughts": rag_result.get("thoughts") or {},
+            "quality_passed": rag_result.get("quality_passed"),
+            "quality_level": rag_result.get("quality_level"),
+            "manual_review_recommended": rag_result.get("manual_review_recommended", False),
         },
         "image_analysis": {
             "has_image": bool(has_image or query_image_oss_key),

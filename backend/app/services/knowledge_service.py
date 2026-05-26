@@ -383,6 +383,7 @@ async def invoke_knowledge_qa(
         "confidence": result["confidence"],
         "sources": result["sources"],
         "model": model_name,
+        "kb_name": kb.get("name") if kb else None,
         "thoughts": thoughts,
         "image_map": result.get("image_map") or None,
         "finish_reason": "stop",
