@@ -4,7 +4,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
-from app.db import get_service_ticket_repository
 from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -217,6 +216,12 @@ COMPLETION_COMPLETE = "complete"
 COMPLETION_INCOMPLETE = "incomplete"
 
 
+def get_service_ticket_repository():
+    from app.db.service_ticket_repository import get_service_ticket_repository as _get_repo
+
+    return _get_repo()
+
+
 def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
     return _rag_result_proves_miss(rag_result)
 
@@ -320,7 +325,7 @@ def process_ticket_clarification_turn(
     )
     missing_fields = _collected_missing_fields(required_fields, collected)
 
-    no_standard_workflow = intent_class == INTENT_OPERATION and workflow is not None and not workflow_found
+    no_standard_workflow = intent_class == INTENT_OPERATION and not workflow_found
     operation_fields_complete = intent_class == INTENT_OPERATION and workflow_found and not missing_fields
     round_limit_reached = round_no >= _round_limit(intent_class)
     should_finalize = no_standard_workflow or operation_fields_complete or round_limit_reached

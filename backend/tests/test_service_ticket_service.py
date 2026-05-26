@@ -379,6 +379,36 @@ class ServiceTicketStateTests(unittest.TestCase):
         self.assertEqual(repo.ticket["clarification"]["completion_status"], "incomplete")
 
     @patch("app.services.service_ticket_service.get_service_ticket_repository")
+    def test_operation_without_workflow_finalizes_as_no_standard_workflow(self, mock_repo):
+        repo = FakeClarificationRepo()
+        mock_repo.return_value = repo
+        decision = {
+            "intent_class": "A",
+            "reason": "operation_required",
+            "needs_ticket_flow": True,
+            "fields": {"issue_detail": "bind account"},
+            "missing_fields": [],
+            "question": "",
+            "source": "llm",
+        }
+
+        result = process_ticket_clarification_turn(
+            session_id="session-1",
+            user_id="store-1",
+            user_name="store owner",
+            sender_id=None,
+            requester_name="store owner",
+            kb_name="fushang",
+            query="help me bind account",
+            channel="h5",
+            decision=decision,
+        )
+
+        self.assertEqual(result["status"], "pending_manual")
+        self.assertEqual(repo.ticket["clarification"]["exit_reason"], "no_standard_workflow")
+        self.assertEqual(repo.ticket["clarification"]["completion_status"], "incomplete")
+
+    @patch("app.services.service_ticket_service.get_service_ticket_repository")
     def test_operation_with_complete_required_fields_marks_complete(self, mock_repo):
         repo = FakeClarificationRepo()
         mock_repo.return_value = repo
