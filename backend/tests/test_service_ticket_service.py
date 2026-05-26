@@ -397,9 +397,11 @@ class ServiceTicketServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(first["status"], "clarifying")
-        self.assertEqual(second["status"], "clarifying")
+        self.assertEqual(second["status"], "pending_manual")
         self.assertEqual(repo.ticket["clarification"]["required_fields"], ["phone"])
         self.assertEqual(repo.ticket["clarification"]["missing_fields"], [])
+        self.assertEqual(repo.ticket["clarification"]["exit_reason"], "fields_complete")
+        self.assertEqual(repo.ticket["clarification"]["completion_status"], "complete")
 
     @patch("app.services.service_ticket_service.get_service_ticket_repository")
     def test_workflow_without_summary_still_mentions_workflow(self, mock_repo):
@@ -456,8 +458,11 @@ class ServiceTicketServiceTests(unittest.TestCase):
             workflow_sources=[],
         )
 
-        self.assertIn("查到相关流程", result["answer"])
-        self.assertIn("确认以上信息", result["answer"])
+        self.assertEqual(result["status"], "pending_manual")
+        self.assertIn("已为您记录问题", result["answer"])
+        self.assertIn("工单号 ticket-1", result["answer"])
+        self.assertEqual(result["clarification"]["exit_reason"], "fields_complete")
+        self.assertEqual(result["clarification"]["completion_status"], "complete")
 
 
     def test_refusal_detection_matches_explicit_stop_phrases(self):
@@ -517,6 +522,7 @@ class ServiceTicketServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending_manual")
         self.assertEqual(result["finish_reason"], "manual_ticket_created")
         self.assertIn("工单号 ticket-1", result["answer"])
+        self.assertIn("工单号 ticket-1", result["clarification"]["turns"][-1]["answer"])
         self.assertEqual(repo.ticket["clarification_round"], 1)
         self.assertEqual(repo.ticket["clarification"]["intent_class"], INTENT_OPERATION)
         self.assertEqual(repo.ticket["clarification"]["exit_reason"], "no_standard_workflow")
