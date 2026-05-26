@@ -614,10 +614,13 @@ def process_clarification_turn(
     workflow_info = _normalize_workflow_payload(workflow)
     if not workflow_info["workflow_found"] and existing.get("workflow_found"):
         workflow_info = _normalize_workflow_payload(existing)
+
     original_query = existing.get("original_query") or query
     trigger_reason = existing.get("reason") or trigger_reason
+    intent_class = existing.get("intent_class") or _intent_class_for_reason(trigger_reason)
     turns = list(existing.get("turns") or [])
     round_no = max(int(active.get("clarification_round") or 0) if active else 0, len(turns)) + 1
+
     collected = _merge_collected_info(
         existing.get("collected") or {},
         query=query,
@@ -634,27 +637,58 @@ def process_clarification_turn(
     )
     field_labels = workflow_info.get("field_labels") or existing.get("field_labels") or {}
     workflow_summary = workflow_info.get("workflow_summary") or existing.get("workflow_summary") or ""
+    workflow_found = bool(workflow_info.get("workflow_found") or existing.get("workflow_found"))
     fallback_used = bool(workflow_info.get("fallback_used", existing.get("fallback_used", False)))
     missing = _missing_fields(required, collected)
-    should_finalize = round_no >= MAX_CLARIFICATION_ROUNDS or (
-        round_no >= MIN_CLARIFICATION_ROUNDS and not missing
+    user_refused = _is_user_refusal(query)
+    no_standard_workflow = (
+        intent_class == INTENT_OPERATION
+        and force_start
+        and workflow is not None
+        and not workflow_found
+    )
+    round_cap_reached = round_no >= _max_rounds_for_intent(intent_class)
+    fields_complete = _is_complete(intent_class, missing)
+
+    should_finalize = bool(
+        user_refused
+        or no_standard_workflow
+        or fields_complete
+        or round_cap_reached
     )
     status = "pending_manual" if should_finalize else "clarifying"
-    answer = (
-        _manual_ticket_answer(
-            active["id"] if active else None,
+
+    if user_refused:
+        exit_reason = EXIT_USER_REFUSED
+        completion_status = COMPLETION_INCOMPLETE
+    elif no_standard_workflow:
+        exit_reason = EXIT_NO_STANDARD_WORKFLOW
+        completion_status = COMPLETION_INCOMPLETE
+    elif fields_complete:
+        exit_reason = EXIT_FIELDS_COMPLETE
+        completion_status = COMPLETION_COMPLETE
+    elif round_cap_reached:
+        exit_reason = _exit_reason_for_round_cap(intent_class)
+        completion_status = COMPLETION_INCOMPLETE
+    else:
+        exit_reason = ""
+        completion_status = existing.get("completion_status") or COMPLETION_INCOMPLETE
+
+    if should_finalize:
+        answer = _manual_ticket_answer(
+            active.get("id") if active else None,
             missing,
-            completion_status=COMPLETION_INCOMPLETE if missing else COMPLETION_COMPLETE,
+            completion_status=completion_status,
         )
-        if should_finalize
-        else _next_clarification_question(
+    else:
+        answer = _next_clarification_question(
             round_no,
             trigger_reason,
             missing,
             workflow_summary=workflow_summary,
             field_labels=field_labels,
         )
-    )
+
     turns.append(
         {
             "round": round_no,
@@ -665,17 +699,25 @@ def process_clarification_turn(
         }
     )
     clarification = {
+        "intent_class": intent_class,
         "reason": trigger_reason,
         "original_query": original_query,
         "required_fields": required,
         "missing_fields": missing,
-        "workflow_found": bool(workflow_info.get("workflow_found") or existing.get("workflow_found")),
+        "workflow_found": workflow_found,
         "workflow_summary": workflow_summary,
         "field_labels": field_labels,
         "workflow_sources": existing.get("workflow_sources") or _workflow_sources_summary(workflow_sources),
         "fallback_used": fallback_used,
+        "kb_result": existing.get("kb_result") or {},
+        "image_analysis": existing.get("image_analysis") or {
+            "has_image": bool(collected.get("has_image") or collected.get("image_keys")),
+            "categories": [],
+        },
         "collected": collected,
         "turns": turns,
+        "completion_status": completion_status,
+        "exit_reason": exit_reason,
         "ready_for_manual": should_finalize,
     }
 
@@ -708,6 +750,23 @@ def process_clarification_turn(
             clarification_round=round_no,
             clarification=clarification,
             contexts=build_context_snapshots(workflow_sources),
+        )
+    if ticket and status == "pending_manual" and "工单号 后台工单" in answer:
+        answer = _manual_ticket_answer(
+            ticket.get("id"),
+            missing,
+            completion_status=completion_status,
+        )
+        turns[-1]["answer"] = answer
+        clarification["turns"] = turns
+        ticket = repo.update_clarification(
+            ticket["id"],
+            status=status,
+            answer=answer,
+            clarification_round=round_no,
+            clarification=clarification,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
         )
     return {
         "ticket_id": ticket["id"] if ticket else active.get("id") if active else None,
