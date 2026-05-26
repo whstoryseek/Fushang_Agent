@@ -172,6 +172,69 @@ class ServiceTicketClassifierTests(unittest.TestCase):
         self.assertTrue(result["needs_ticket_flow"])
 
     @patch("app.services.service_ticket_service.get_llm_service")
+    def test_llm_b_with_real_shaped_missing_reason_starts_ticket_flow(self, mock_get_llm):
+        llm = MagicMock()
+        llm.responses_text.return_value = json.dumps(
+            {
+                "intent_class": "B",
+                "reason": "knowledge_missing",
+                "needs_ticket_flow": False,
+                "confidence": 0.82,
+                "fields": {},
+                "missing_fields": ["issue_detail"],
+                "question": "请补充问题细节。",
+                "rationale_brief": "RAG missed",
+            },
+            ensure_ascii=False,
+        )
+        mock_get_llm.return_value = llm
+
+        result = classify_ticket_intent_with_llm(
+            query="一个新问题",
+            history=[],
+            has_image=False,
+            rag_result={
+                "used_fallback": True,
+                "fallback_reason": "Answer states knowledge base has no relevant content",
+            },
+        )
+
+        self.assertEqual(result["intent_class"], INTENT_MISSING_KNOWLEDGE)
+        self.assertTrue(result["needs_ticket_flow"])
+
+    @patch("app.services.service_ticket_service.get_llm_service")
+    def test_llm_b_with_generic_quality_failure_does_not_start_ticket_flow(self, mock_get_llm):
+        llm = MagicMock()
+        llm.responses_text.return_value = json.dumps(
+            {
+                "intent_class": "B",
+                "reason": "knowledge_missing",
+                "needs_ticket_flow": True,
+                "confidence": 0.82,
+                "fields": {},
+                "missing_fields": ["issue_detail"],
+                "question": "请补充问题细节。",
+                "rationale_brief": "RAG answer quality failed",
+            },
+            ensure_ascii=False,
+        )
+        mock_get_llm.return_value = llm
+
+        result = classify_ticket_intent_with_llm(
+            query="一个新问题",
+            history=[],
+            has_image=False,
+            rag_result={
+                "used_fallback": True,
+                "quality_passed": False,
+                "fallback_reason": "Answer too short; Confidence below threshold",
+            },
+        )
+
+        self.assertEqual(result["intent_class"], INTENT_MISSING_KNOWLEDGE)
+        self.assertFalse(result["needs_ticket_flow"])
+
+    @patch("app.services.service_ticket_service.get_llm_service")
     def test_malformed_classifier_json_defaults_empty_text_without_image_to_c(self, mock_get_llm):
         llm = MagicMock()
         llm.responses_text.return_value = "not json"

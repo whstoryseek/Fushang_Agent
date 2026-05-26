@@ -79,7 +79,16 @@ def _rag_result_proves_miss(rag_result: Optional[Dict[str, Any]]) -> bool:
     if not rag_result.get("used_fallback"):
         return False
     fallback_reason = str(rag_result.get("fallback_reason") or "").lower()
-    return "no_relevant" in fallback_reason or rag_result.get("quality_passed") is False
+    if "no_relevant" in fallback_reason or "no relevant" in fallback_reason:
+        return True
+    if "knowledge base has no relevant content" in fallback_reason:
+        return True
+    if "知识库" in fallback_reason:
+        return any(
+            phrase in fallback_reason
+            for phrase in ("无相关", "没有相关", "未找到", "没有找到")
+        )
+    return False
 
 
 def _normalize_payload(
