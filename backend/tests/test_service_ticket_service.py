@@ -494,6 +494,52 @@ class ServiceTicketServiceTests(unittest.TestCase):
         self.assertEqual(_exit_reason_for_round_cap(INTENT_AMBIGUOUS), "semantic_unresolved")
 
     @patch("app.services.service_ticket_service.get_service_ticket_repository")
+    def test_missing_knowledge_flow_finalizes_after_five_rounds(self, mock_repo):
+        repo = FakeClarificationRepo()
+        repo.ticket = {
+            "id": "ticket-1",
+            "session_id": "session-1",
+            "user_id": "store-1",
+            "kb_name": "fushang",
+            "status": "clarifying",
+            "clarification_round": 4,
+            "clarification": {
+                "intent_class": INTENT_MISSING_KNOWLEDGE,
+                "reason": "knowledge_missing",
+                "original_query": "\u77e5\u8bc6\u5e93\u6ca1\u6709\u7684\u65b0\u95ee\u9898",
+                "required_fields": ["issue_detail", "phone"],
+                "missing_fields": ["phone"],
+                "collected": {"issue_detail": "\u77e5\u8bc6\u5e93\u6ca1\u6709\u7684\u65b0\u95ee\u9898"},
+                "turns": [
+                    {"round": 1, "query": "\u77e5\u8bc6\u5e93\u6ca1\u6709\u7684\u65b0\u95ee\u9898"},
+                    {"round": 2, "query": "\u8fd8\u662f\u6ca1\u6709\u7b54\u6848"},
+                    {"round": 3, "query": "\u9700\u8981\u540e\u53f0\u786e\u8ba4"},
+                    {"round": 4, "query": "\u8bf7\u7ee7\u7eed\u8bb0\u5f55"},
+                ],
+                "kb_result": {"hit": False},
+            },
+        }
+        mock_repo.return_value = repo
+
+        result = process_clarification_turn(
+            session_id="session-1",
+            user_id="store-1",
+            user_name="\u5f20\u5e97\u957f",
+            sender_id=None,
+            requester_name="\u5f20\u5e97\u957f",
+            kb_name="fushang",
+            query="\u624b\u673a\u53f7 13800138000",
+            channel="h5",
+            continue_only=True,
+        )
+
+        self.assertEqual(result["status"], "pending_manual")
+        self.assertEqual(result["finish_reason"], "manual_ticket_created")
+        self.assertEqual(repo.ticket["clarification_round"], 5)
+        self.assertEqual(repo.ticket["clarification"]["exit_reason"], "max_rounds")
+        self.assertEqual(repo.ticket["clarification"]["completion_status"], "incomplete")
+
+    @patch("app.services.service_ticket_service.get_service_ticket_repository")
     def test_no_workflow_operation_finalizes_manual_ticket_immediately(self, mock_repo):
         repo = FakeClarificationRepo()
         mock_repo.return_value = repo
