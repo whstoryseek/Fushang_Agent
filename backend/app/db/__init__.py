@@ -9,6 +9,7 @@ from .chunk_repository import get_chunk_repository, ChunkRepository
 from .chunk_image_repository import get_chunk_image_repository, ChunkImageRepository
 from .conversation_repository import get_conversation_repository, ConversationRepository
 from .unanswered_repository import get_unanswered_repository, UnansweredRepository
+from .service_ticket_repository import get_service_ticket_repository, ServiceTicketRepository
 from .file_storage_repository import get_file_storage_repository, FileStorageRepository
 from .auth_user_repository import get_auth_user_repository, AuthUserRepository
 
@@ -22,6 +23,7 @@ __all__ = [
     "get_chunk_image_repository", "ChunkImageRepository",
     "get_conversation_repository", "ConversationRepository",
     "get_unanswered_repository", "UnansweredRepository",
+    "get_service_ticket_repository", "ServiceTicketRepository",
     "get_file_storage_repository", "FileStorageRepository",
     "get_auth_user_repository", "AuthUserRepository",
 ]
