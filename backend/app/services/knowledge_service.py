@@ -14,6 +14,18 @@ from app.core.exceptions import ValidationError, ExternalServiceError
 logger = logging.getLogger(__name__)
 
 
+def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
+    from app.services.service_ticket_service import should_start_missing_knowledge_flow as _should_start
+
+    return _should_start(rag_result)
+
+
+def start_missing_knowledge_clarification(**kwargs) -> Dict[str, Any]:
+    from app.services.service_ticket_service import start_missing_knowledge_clarification as _start
+
+    return _start(**kwargs)
+
+
 def _sse(event: Optional[str], data: Dict[str, Any]) -> str:
     """单条 SSE 文本帧（UTF-8 由 StreamingResponse 编码）。"""
     lines = []
@@ -515,6 +527,7 @@ async def stream_knowledge_qa_sse(
     channel: str = "web",
     sender_id: Optional[str] = None,
     requester_name: Optional[str] = None,
+    convert_missing_knowledge_to_ticket: bool = False,
 ) -> AsyncIterator[str]:
     """
     Knowledge 问答 SSE：检索阶段走 LangGraph（interrupt 在 generate 前），
@@ -639,6 +652,48 @@ async def stream_knowledge_qa_sse(
     if manual_review_recommended:
         done_thoughts["manual_review_recommended"] = True
 
+    rag_result = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "answer": answer_final,
+        "confidence": done_confidence,
+        "sources": done_sources,
+        "model": model_name,
+        "thoughts": done_thoughts,
+        "image_map": final.get("image_map") or ctx.get("image_map") or {},
+        "finish_reason": finish_reason,
+        "used_fallback": final.get("used_fallback", False),
+        "fallback_reason": final.get("fallback_reason"),
+        "quality_passed": final.get("quality_passed"),
+        "quality_level": _extract_quality_level(final.get("answer_quality")),
+        "manual_review_recommended": manual_review_recommended,
+    }
+    missing_result = None
+    if convert_missing_knowledge_to_ticket and should_start_missing_knowledge_flow(rag_result):
+        missing_result = start_missing_knowledge_clarification(
+            session_id=session_id,
+            user_id=user_id,
+            user_name=user_name,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+            kb_name=collection,
+            query=query,
+            channel=channel,
+            rag_result=rag_result,
+            has_image=bool(query_image_oss_key),
+            query_image_oss_key=query_image_oss_key,
+        )
+        answer_final = missing_result["answer"]
+        done_sources = []
+        done_confidence = 0.0
+        finish_reason = missing_result.get("finish_reason") or "clarification"
+        done_thoughts = {
+            **done_thoughts,
+            "clarification_required": True,
+            "clarification": missing_result.get("clarification"),
+            "missing_knowledge_started": True,
+        }
+
     yield _sse(
         "done",
         {
@@ -654,24 +709,25 @@ async def stream_knowledge_qa_sse(
         },
     )
 
-    _persist_conversation_messages(
-        session_id,
-        query,
-        answer_final,
-        final.get("sources") or [],
-        final.get("confidence"),
-        query_image_oss_key,
-        used_fallback=final.get("used_fallback", False),
-        fallback_reason=final.get("fallback_reason"),
-        quality_passed=final.get("quality_passed"),
-        quality_level=_extract_quality_level(final.get("answer_quality")),
-        kb_name=kb.get("name") if kb else None,
-        user_id=user_id,
-        user_name=user_name,
-        channel=channel,
-        sender_id=sender_id,
-        requester_name=requester_name or user_name,
-    )
+    if not missing_result:
+        _persist_conversation_messages(
+            session_id,
+            query,
+            answer_final,
+            final.get("sources") or [],
+            final.get("confidence"),
+            query_image_oss_key,
+            used_fallback=final.get("used_fallback", False),
+            fallback_reason=final.get("fallback_reason"),
+            quality_passed=final.get("quality_passed"),
+            quality_level=_extract_quality_level(final.get("answer_quality")),
+            kb_name=kb.get("name") if kb else None,
+            user_id=user_id,
+            user_name=user_name,
+            channel=channel,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+        )
 
 
 async def stream_clarification_sse(

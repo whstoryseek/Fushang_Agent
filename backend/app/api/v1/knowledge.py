@@ -407,6 +407,7 @@ async def knowledge_qa_stream(request: KnowledgeRequest, identity: dict = Depend
             channel=identity.get("channel") or "web",
             sender_id=identity.get("sender_id"),
             requester_name=identity.get("requester_name"),
+            convert_missing_knowledge_to_ticket=True,
         ):
             yield chunk
 
