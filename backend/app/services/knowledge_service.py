@@ -676,7 +676,7 @@ async def stream_knowledge_qa_sse(
             user_name=user_name,
             sender_id=sender_id,
             requester_name=requester_name or user_name,
-            kb_name=collection,
+            kb_name=kb.get("name") if kb else collection,
             query=query,
             channel=channel,
             rag_result=rag_result,
