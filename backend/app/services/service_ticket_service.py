@@ -108,6 +108,7 @@ _REFUSAL_RE = re.compile(
     r"(不想回答|不用问|别问|不知道|不清楚|无法提供|没法提供|没有更多|没有其他|直接处理|直接提交|你们处理|人工处理)"
 )
 _REFUSAL_STOP_RE = re.compile(r"(不想回答|不用问|别问|直接处理|直接提交|你们处理|人工处理)")
+_UNCLEAR_CONTINUATION_RE = re.compile(r"(还是|仍然|仍旧|依然|还).{0,4}(不清楚|不知道)")
 _USEFUL_INFO_RE = re.compile(
     r"(手机号|手机|电话|门店|店铺|账号|账户|截图|图片|已传|上传|身份证|证件|138\d{8}|1[3-9]\d{9})"
 )
@@ -119,6 +120,8 @@ def _is_user_refusal(query: str) -> bool:
         return False
     if _REFUSAL_STOP_RE.search(text):
         return True
+    if _UNCLEAR_CONTINUATION_RE.search(text):
+        return False
     if _USEFUL_INFO_RE.search(text):
         return False
     return True

@@ -480,6 +480,7 @@ class ServiceTicketServiceTests(unittest.TestCase):
 
         self.assertFalse(_is_user_refusal("手机号 13800138000，门店是A店"))
         self.assertFalse(_is_user_refusal("手机号不知道，门店是A店，截图已传"))
+        self.assertFalse(_is_user_refusal("还是不清楚"))
 
     def test_intent_helper_contracts_include_missing_knowledge_class(self):
         self.assertEqual(_intent_class_for_reason("knowledge_missing"), INTENT_MISSING_KNOWLEDGE)
