@@ -4,7 +4,7 @@
 
 Refactor the current ticket collection flow so the system can reliably route only the right requests into manual-work tickets while leaving normal RAG answers unchanged.
 
-The approved classification boundary is:
+The approved classification boundary is decided by an LLM classifier, not by keyword or regex rules:
 
 - A: user asks the system or staff to perform a concrete action on a concrete business object, such as "帮我绑定门店" or "给他开通权限".
 - B: RAG has already tried the normal knowledge-base flow and still cannot find a usable answer.
@@ -17,8 +17,8 @@ The current code already has most of the infrastructure needed:
 
 - `backend/app/api/v1/knowledge.py` is the request entry point for normal and streaming knowledge-base Q&A.
 - `backend/app/services/knowledge_service.py` invokes the LangGraph RAG flow and persists conversation messages.
-- `backend/app/services/service_ticket_service.py` owns ticket status decisions, operation clarification, collected fields, and ticket persistence.
-- `backend/app/db/service_ticket_repository.py` stores tickets in `service_ticket` and retrieval snapshots in `service_ticket_context`.
+- A service-ticket service layer should own ticket status decisions, operation clarification, collected fields, and ticket persistence.
+- The existing `service_ticket` repository/table shape should store tickets in `service_ticket` and retrieval snapshots in `service_ticket_context` when available.
 - `service_ticket.clarification` is a JSON payload that can hold multi-turn state without a schema migration for the first implementation.
 
 The design should extend these existing modules rather than create a second ticket system.
@@ -26,6 +26,15 @@ The design should extend these existing modules rather than create a second tick
 ## Recommended Approach
 
 Use a unified special-intent state machine inside `service_ticket_service.py`, with `knowledge.py` acting as a thin orchestration layer.
+
+Intent recognition itself must be LLM-first:
+
+- Use `doubao-seed-2-0-mini-260428` for ticket intent classification.
+- Call the lightweight LLM path with thinking disabled. The preferred local interface is `LLMService.responses_text(...)`, because it already sends `extra_body={"thinking": {"type": "disabled"}}`.
+- The classifier must be latency-bounded so normal RAG is not slowed down. For normal text queries, start the original RAG work immediately and run the classifier as a parallel race. If the classifier does not return before the short interception deadline, continue as D and keep the original RAG path.
+- The classifier returns strict JSON with `intent_class`, `reason`, `confidence`, `needs_ticket_flow`, `fields`, `missing_fields`, `question`, and `rationale_brief`.
+- Deterministic rules must not decide A/B/C/D. They may only validate JSON, enforce round limits, check required-field completeness, and keep B gated behind a real RAG miss.
+- If classifier output is invalid or the LLM call fails, default to D for normal text queries. For image-only or empty queries, default to C because there is no safe RAG query.
 
 The first version should keep all durable state in the existing `service_ticket` row:
 
@@ -52,29 +61,48 @@ If an active ticket exists:
 
 This supports interruption recovery from any collection round.
 
-### Pre-RAG Special Intent Detection
+### Pre-RAG LLM Special Intent Detection
 
-Only A and C should be intercepted before RAG.
+Only A and C should be intercepted before RAG, and the decision must come from the mini LLM classifier.
 
-A class must satisfy both conditions:
+This classifier participates in the hot path, so it has a strict performance contract:
+
+- target p95 classifier latency: under 800 ms in the deployed environment
+- interception deadline: 600 ms or lower for normal text queries
+- hard timeout: 1.2 seconds or lower, configurable by `OPERATION_CLASSIFIER_TIMEOUT`, only to clean up the classifier task
+- output budget: JSON only, no chain-of-thought, no explanatory prose, ideally under 300 tokens
+- history budget: current query plus only the minimum recent turns needed for ambiguity recovery
+- timeout, invalid JSON, service error, or classifier finishing after the interception deadline: treat as D for normal text and keep RAG proceeding
+
+The system must never wait for a slow classifier before answering a normal knowledge-base question. Preserving RAG latency is more important than catching every possible A/C case.
+
+For non-stream requests, `knowledge.py` should create the RAG task and the mini-classifier task together. If the classifier returns A or C before the interception deadline, cancel or ignore the RAG task and enter the ticket clarification flow. If the classifier returns D, times out, or is still running when the deadline expires, await the already-started RAG task and return the original RAG answer.
+
+For stream requests, retrieval/preparation should start immediately. The endpoint may only intercept before the first user-visible `delta` frame. Once streaming output begins, the request is committed to normal RAG unless the later post-RAG B gate is hit.
+
+The classifier prompt must make the A/D boundary explicit. A class must satisfy both conditions:
 
 - concrete action target: account, store, employee, permission, payment account, order, page, or similar object
 - delegation intent: "帮我", "给我", "替我", "处理一下", "弄一下", "安排一下", "开通/关闭/绑定/解绑/重置" used as a request to perform the action
 
-The guardrail is strict: tutorial, consultation, reason, and capability questions stay D and go to RAG.
+The guardrail is strict: tutorial, consultation, reason, and capability questions stay D and go to RAG. Phrases such as "怎么/如何/能否/有什么用" are not A by themselves. If the message asks how to do something or whether a feature can do something, classify D unless the user explicitly asks staff or the system to perform the action for them.
 
 C class is for messages that are too short, incomplete, image-only, or dependent on missing context. It asks for clarification before the system tries to decide whether the issue is A, B, or D.
 
 ### Post-RAG B Detection
 
-B class should not be guessed before retrieval. It should trigger only when normal RAG completes with no usable answer, such as:
+B class should not be guessed before retrieval. The LLM classifier may suggest that a question is likely uncovered, but the flow may only enter B after normal RAG completes with no usable answer.
+
+The B gate is a deterministic eligibility check over RAG output, not intent classification:
 
 - `used_fallback=True`
 - `fallback_reason` indicates no relevant knowledge
 - `quality_passed=False` because the answer says the knowledge base has no relevant content
 - confidence is below the manual-review threshold and sources are weak
 
-When B is triggered, the user-facing answer becomes a clarification question instead of a final low-confidence answer. The original RAG output and sources are stored in the ticket payload.
+When the RAG miss gate is satisfied, ask the mini LLM classifier to produce the first B-class clarification question from the original query, RAG miss evidence, history, and any image extraction result. The user-facing answer becomes that clarification question instead of a final low-confidence answer. The original RAG output and sources are stored in the ticket payload.
+
+B classification is not on the successful-RAG path. For D-class questions that RAG can answer, no B clarification call should run.
 
 ## A-Class Flow
 
@@ -132,7 +160,7 @@ The first C question should be direct and short, for example:
 - "您的问题是否涉及某个具体业务场景或系统页面？"
 - "能否补充具体操作步骤、报错信息，或说明截图中想处理的问题？"
 
-After every C reply, rerun intent routing:
+After every C reply, rerun the mini LLM classifier with the full active-ticket history:
 
 - if it becomes D, return to normal RAG
 - if it becomes A, enter A-class flow
@@ -141,7 +169,7 @@ After every C reply, rerun intent routing:
 
 ## User Refusal
 
-If the user explicitly says they do not want to answer, do not know, cannot provide, or wants staff to handle it directly:
+If the mini LLM classifier identifies an explicit refusal, or the user clearly says they do not want to answer, cannot provide, or wants staff to handle it directly:
 
 - stop further questioning
 - finalize the active ticket as `pending_manual`
@@ -206,7 +234,11 @@ After finalization, the active `clarifying` state ends because the ticket status
 
 ## Error Handling
 
-LLM classifier failure should default to D, unless deterministic rules clearly identify C. This prevents over-routing normal questions into manual tickets.
+LLM classifier failure should default to D for normal text queries and C for image-only or empty queries. This prevents over-routing normal questions into manual tickets while still handling messages that cannot be answered as text.
+
+The implementation should log classifier failures and malformed JSON, but it should not expose model errors to the user. The prompt should require JSON-only output; any prose outside JSON is treated as invalid.
+
+If the pre-RAG classifier times out or misses the interception deadline, the request should be indistinguishable from the original RAG flow except for an internal warning log. It should not write a ticket, ask clarification, or alter `KnowledgeResponse`.
 
 SOP retrieval or SOP extraction failure should not block the user. For A class, it should finalize a ticket with `workflow_found=false` and `fallback_used=true`.
 
@@ -220,8 +252,15 @@ Ticket persistence failure should be logged and should not crash normal RAG for 
 
 Backend service tests:
 
+- classifier calls `doubao-seed-2-0-mini-260428` through `LLMService.responses_text()` so thinking is disabled.
+- classifier uses the configured short timeout and small token budget.
+- classifier timeout on normal text defaults to D and does not delay the normal RAG path.
+- normal-text API tests prove RAG is started even while the classifier is still pending.
+- malformed classifier JSON defaults normal text to D.
+- image-only classifier failure defaults to C.
 - A tutorials such as "富友账户怎么绑定" remain D and do not start tickets.
 - A delegation requests such as "帮我绑定富友账户" start A-class collection.
+- the A/D distinction is asserted with mocked LLM JSON, not keyword matching.
 - A with SOP found asks only missing SOP fields.
 - A with no SOP finalizes immediately to `pending_manual`.
 - B starts only after RAG fallback, not before retrieval.
