@@ -669,30 +669,35 @@ async def stream_knowledge_qa_sse(
         "manual_review_recommended": manual_review_recommended,
     }
     missing_result = None
-    if convert_missing_knowledge_to_ticket and should_start_missing_knowledge_flow(rag_result):
-        missing_result = start_missing_knowledge_clarification(
-            session_id=session_id,
-            user_id=user_id,
-            user_name=user_name,
-            sender_id=sender_id,
-            requester_name=requester_name or user_name,
-            kb_name=kb.get("name") if kb else collection,
-            query=query,
-            channel=channel,
-            rag_result=rag_result,
-            has_image=bool(query_image_oss_key),
-            query_image_oss_key=query_image_oss_key,
-        )
-        answer_final = missing_result["answer"]
-        done_sources = []
-        done_confidence = 0.0
-        finish_reason = missing_result.get("finish_reason") or "clarification"
-        done_thoughts = {
-            **done_thoughts,
-            "clarification_required": True,
-            "clarification": missing_result.get("clarification"),
-            "missing_knowledge_started": True,
-        }
+    if convert_missing_knowledge_to_ticket:
+        try:
+            if should_start_missing_knowledge_flow(rag_result):
+                missing_result = start_missing_knowledge_clarification(
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_name=user_name,
+                    sender_id=sender_id,
+                    requester_name=requester_name or user_name,
+                    kb_name=kb.get("name") if kb else collection,
+                    query=query,
+                    channel=channel,
+                    rag_result=rag_result,
+                    has_image=bool(query_image_oss_key),
+                    query_image_oss_key=query_image_oss_key,
+                )
+                answer_final = missing_result["answer"]
+                done_sources = []
+                done_confidence = 0.0
+                finish_reason = missing_result.get("finish_reason") or "clarification"
+                done_thoughts = {
+                    **done_thoughts,
+                    "clarification_required": True,
+                    "clarification": missing_result.get("clarification"),
+                    "missing_knowledge_started": True,
+                }
+        except Exception:
+            logger.exception("Missing knowledge ticket conversion failed; falling back to normal RAG stream")
+            missing_result = None
 
     yield _sse(
         "done",
