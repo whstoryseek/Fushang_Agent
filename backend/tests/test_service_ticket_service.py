@@ -538,6 +538,14 @@ class ServiceTicketServiceTests(unittest.TestCase):
         self.assertEqual(repo.ticket["clarification_round"], 5)
         self.assertEqual(repo.ticket["clarification"]["exit_reason"], "max_rounds")
         self.assertEqual(repo.ticket["clarification"]["completion_status"], "incomplete")
+        self.assertEqual(repo.ticket["clarification"]["collected"]["phone"], "13800138000")
+        self.assertEqual(repo.ticket["clarification"]["missing_fields"], [])
+        self.assertIs(repo.ticket["clarification"]["ready_for_manual"], True)
+        last_turn = repo.ticket["clarification"]["turns"][-1]
+        self.assertEqual(last_turn["round"], 5)
+        self.assertEqual(last_turn["query"], "\u624b\u673a\u53f7 13800138000")
+        self.assertEqual(last_turn["status"], "pending_manual")
+        self.assertEqual(last_turn["answer"], result["answer"])
 
     @patch("app.services.service_ticket_service.get_service_ticket_repository")
     def test_no_workflow_operation_finalizes_manual_ticket_immediately(self, mock_repo):
