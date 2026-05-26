@@ -141,6 +141,8 @@ def _exit_reason_for_round_cap(intent_class: str) -> str:
 
 
 def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
+    if not rag_result.get("used_fallback"):
+        return False
     fallback_reason = str(rag_result.get("fallback_reason") or "").lower()
     sources = rag_result.get("sources") or []
     confidence = rag_result.get("confidence")
@@ -156,9 +158,7 @@ def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
             "无相关",
         ]
     )
-    if rag_result.get("used_fallback") and (no_relevant_reason or rag_result.get("quality_passed") is False):
-        return True
-    if rag_result.get("quality_passed") is False and no_relevant_reason:
+    if no_relevant_reason or rag_result.get("quality_passed") is False:
         return True
     if confidence is not None and float(confidence) < 0.35 and not sources:
         return True

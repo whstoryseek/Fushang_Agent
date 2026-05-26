@@ -652,9 +652,29 @@ class ServiceTicketServiceTests(unittest.TestCase):
                 "sources": [{"id": "chunk-1"}],
             }
         )
+        non_fallback_no_relevant = should_start_missing_knowledge_flow(
+            {
+                "used_fallback": False,
+                "fallback_reason": "no_relevant_knowledge",
+                "quality_passed": False,
+                "confidence": 0.2,
+                "sources": [],
+            }
+        )
+        non_fallback_low_confidence = should_start_missing_knowledge_flow(
+            {
+                "used_fallback": False,
+                "fallback_reason": None,
+                "quality_passed": True,
+                "confidence": 0.2,
+                "sources": [],
+            }
+        )
 
         self.assertTrue(should_start)
         self.assertFalse(should_skip)
+        self.assertFalse(non_fallback_no_relevant)
+        self.assertFalse(non_fallback_low_confidence)
 
 
 if __name__ == "__main__":
