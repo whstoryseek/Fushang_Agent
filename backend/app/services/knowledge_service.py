@@ -92,6 +92,29 @@ def _persist_conversation_messages(
         logger.warning(f"消息持久化失败（不影响回答）: {e}")
 
 
+def persist_knowledge_result(
+    *,
+    session_id: str,
+    query: str,
+    result: Dict[str, Any],
+    query_image_oss_key: Optional[str] = None,
+    kb_name: Optional[str] = None,
+) -> None:
+    _persist_conversation_messages(
+        session_id,
+        query,
+        result.get("answer") or "",
+        result.get("sources") or [],
+        result.get("confidence"),
+        query_image_oss_key,
+        used_fallback=result.get("used_fallback", False),
+        fallback_reason=result.get("fallback_reason"),
+        quality_passed=result.get("quality_passed"),
+        quality_level=result.get("quality_level"),
+        kb_name=kb_name,
+    )
+
+
 def _load_kb_retrieval(collection: Optional[str]):
     rc: dict = {}
     kb = None
@@ -181,6 +204,7 @@ async def invoke_knowledge_qa(
     keyword_filter: Optional[str] = None,
     query_image_url: Optional[str] = None,
     query_image_oss_key: Optional[str] = None,
+    persist: bool = True,
 ) -> dict:
     """调用 Knowledge Agent 执行 RAG 问答。"""
     if model_name not in SUPPORTED_MODELS:
@@ -238,6 +262,7 @@ async def invoke_knowledge_qa(
         "conversation_turns": 1,
     }
 
+    quality_level = _extract_quality_level(result.get("answer_quality"))
     return_data = {
         "request_id": request_id,
         "session_id": session_id,
@@ -247,21 +272,22 @@ async def invoke_knowledge_qa(
         "model": model_name,
         "thoughts": thoughts,
         "image_map": result.get("image_map") or None,
+        "finish_reason": "stop",
+        "used_fallback": result.get("used_fallback", False),
+        "fallback_reason": result.get("fallback_reason"),
+        "quality_passed": result.get("quality_passed"),
+        "quality_level": quality_level,
+        "kb_name": kb.get("name") if kb else None,
     }
 
-    _persist_conversation_messages(
-        session_id,
-        query,
-        result.get("answer") or "",
-        result.get("sources") or [],
-        result.get("confidence"),
-        query_image_oss_key,
-        used_fallback=result.get("used_fallback", False),
-        fallback_reason=result.get("fallback_reason"),
-        quality_passed=result.get("quality_passed"),
-        quality_level=_extract_quality_level(result.get("answer_quality")),
-        kb_name=kb.get("name") if kb else None,
-    )
+    if persist:
+        persist_knowledge_result(
+            session_id=session_id,
+            query=query,
+            result=return_data,
+            query_image_oss_key=query_image_oss_key,
+            kb_name=return_data.get("kb_name"),
+        )
 
     return return_data
 
