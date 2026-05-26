@@ -10,6 +10,12 @@ from typing import Optional, AsyncIterator, Dict, Any
 
 from app.core.config import settings, SUPPORTED_MODELS
 from app.core.exceptions import ValidationError, ExternalServiceError
+from app.services.service_ticket_service import (
+    INTENT_MISSING_KNOWLEDGE,
+    classify_ticket_intent_with_llm,
+    process_ticket_clarification_turn,
+    should_start_missing_knowledge_flow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +323,12 @@ async def stream_knowledge_qa_sse(
     keyword_filter: Optional[str] = None,
     query_image_url: Optional[str] = None,
     query_image_oss_key: Optional[str] = None,
+    convert_missing_knowledge_to_ticket: bool = False,
+    user_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     Knowledge 问答 SSE：检索阶段走 LangGraph（interrupt 在 generate 前），
@@ -425,31 +437,85 @@ async def stream_knowledge_qa_sse(
         return
 
     answer_final = final.get("answer") or ""
-    yield _sse(
-        "done",
-        {
-            "request_id": request_id,
-            "session_id": session_id,
-            "answer": answer_final,
-            "confidence": final.get("confidence"),
-            "sources": final.get("sources") or [],
-            "model": model_name,
-            "thoughts": _thoughts_from_state_values(final),
-            "image_map": final.get("image_map") or ctx.get("image_map") or {},
-            "finish_reason": "stop",
-        },
-    )
+    quality_level = _extract_quality_level(final.get("answer_quality"))
+    normal_done_payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "answer": answer_final,
+        "confidence": final.get("confidence"),
+        "sources": final.get("sources") or [],
+        "model": model_name,
+        "thoughts": _thoughts_from_state_values(final),
+        "image_map": final.get("image_map") or ctx.get("image_map") or {},
+        "finish_reason": "stop",
+    }
+    rag_result = {
+        **normal_done_payload,
+        "used_fallback": final.get("used_fallback", False),
+        "fallback_reason": final.get("fallback_reason"),
+        "quality_passed": final.get("quality_passed"),
+        "quality_level": quality_level,
+        "kb_name": kb.get("name") if kb else None,
+    }
 
-    _persist_conversation_messages(
-        session_id,
-        query,
-        answer_final,
-        final.get("sources") or [],
-        final.get("confidence"),
-        query_image_oss_key,
-        used_fallback=final.get("used_fallback", False),
-        fallback_reason=final.get("fallback_reason"),
-        quality_passed=final.get("quality_passed"),
-        quality_level=_extract_quality_level(final.get("answer_quality")),
-        kb_name=kb.get("name") if kb else None,
-    )
+    done_payload = normal_done_payload
+    converted_to_ticket = False
+    if convert_missing_knowledge_to_ticket and should_start_missing_knowledge_flow(rag_result):
+        try:
+            decision = classify_ticket_intent_with_llm(
+                query=query,
+                history=[],
+                has_image=bool(query_image_url or query_image_oss_key),
+                rag_result=rag_result,
+            )
+            if decision.get("intent_class") == INTENT_MISSING_KNOWLEDGE and decision.get("needs_ticket_flow"):
+                ticket_result = process_ticket_clarification_turn(
+                    session_id=session_id,
+                    user_id=user_id or "guest_default",
+                    user_name=user_name,
+                    sender_id=sender_id,
+                    requester_name=requester_name,
+                    kb_name=collection,
+                    query=query,
+                    channel=channel or "web",
+                    decision=decision,
+                    rag_result=rag_result,
+                    has_image=bool(query_image_url or query_image_oss_key),
+                    query_image_oss_key=query_image_oss_key,
+                )
+                if ticket_result:
+                    converted_to_ticket = True
+                    done_payload = {
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "answer": ticket_result["answer"],
+                        "confidence": float(ticket_result.get("confidence") or 0.0),
+                        "sources": [],
+                        "model": model_name,
+                        "thoughts": {
+                            "clarification_required": True,
+                            "clarification": ticket_result.get("clarification"),
+                            "ticket_intent": decision,
+                        },
+                        "image_map": final.get("image_map") or ctx.get("image_map") or {},
+                        "finish_reason": ticket_result.get("finish_reason") or "clarification",
+                    }
+        except Exception as exc:
+            logger.warning("stream missing-knowledge ticket conversion failed: %s", exc)
+
+    yield _sse("done", done_payload)
+
+    if not converted_to_ticket:
+        _persist_conversation_messages(
+            session_id,
+            query,
+            answer_final,
+            final.get("sources") or [],
+            final.get("confidence"),
+            query_image_oss_key,
+            used_fallback=final.get("used_fallback", False),
+            fallback_reason=final.get("fallback_reason"),
+            quality_passed=final.get("quality_passed"),
+            quality_level=quality_level,
+            kb_name=kb.get("name") if kb else None,
+        )

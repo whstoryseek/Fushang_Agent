@@ -300,6 +300,12 @@ async def knowledge_qa_stream(request: KnowledgeRequest, user_id: str = Depends(
             keyword_filter=request.keyword_filter or None,
             query_image_url=query_image_url,
             query_image_oss_key=query_image_oss_key,
+            convert_missing_knowledge_to_ticket=True,
+            user_id=user_id,
+            user_name=None,
+            channel="web",
+            sender_id=None,
+            requester_name=None,
         ):
             yield chunk
 
