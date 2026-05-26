@@ -34,6 +34,22 @@ def _extract_quality_level(answer_quality: Any) -> Optional[str]:
     return str(answer_quality)
 
 
+def _needs_manual_clarification(
+    *,
+    used_fallback: bool,
+    fallback_reason: Optional[str],
+    quality_passed: Optional[bool],
+    confidence: Optional[float],
+) -> bool:
+    if used_fallback or fallback_reason:
+        return True
+    if quality_passed is False:
+        return True
+    if confidence is not None and confidence < 0.6:
+        return True
+    return False
+
+
 def _persist_conversation_messages(
     session_id: str,
     query: str,
@@ -46,6 +62,12 @@ def _persist_conversation_messages(
     quality_passed: Optional[bool] = None,
     quality_level: Optional[str] = None,
     kb_name: Optional[str] = None,
+    user_id: str = "guest_default",
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    processing_ms: Optional[float] = None,
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
 ) -> None:
     """会话存在时写入 user/assistant 消息（与非流式 invoke 一致）。
     若触发 fallback，额外写入 unanswered_question 独立表（与会话脱钩，长期保留）。"""
@@ -90,6 +112,106 @@ def _persist_conversation_messages(
             )
     except Exception as e:
         logger.warning(f"消息持久化失败（不影响回答）: {e}")
+
+    try:
+        from app.services.service_ticket_service import record_qa_ticket
+
+        record_qa_ticket(
+            user_id=user_id,
+            user_name=user_name,
+            kb_name=kb_name,
+            query=query,
+            answer=answer_text or "",
+            sources=sources or [],
+            confidence=confidence,
+            used_fallback=used_fallback,
+            fallback_reason=fallback_reason,
+            quality_passed=quality_passed,
+            quality_level=quality_level,
+            session_id=session_id,
+            channel=channel,
+            processing_ms=processing_ms,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+        )
+    except Exception as e:
+        logger.warning(f"服务记录持久化失败（不影响回答）: {e}")
+
+
+def persist_clarification_message(
+    *,
+    session_id: str,
+    query: str,
+    answer: Optional[str] = None,
+    kb_name: Optional[str],
+    user_id: str,
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+    reason: Optional[str] = None,
+    force_start: bool = False,
+    workflow: Optional[Dict[str, Any]] = None,
+    workflow_sources: Optional[list] = None,
+    continue_only: bool = False,
+) -> Optional[Dict[str, Any]]:
+    try:
+        from app.services.service_ticket_service import process_clarification_turn
+
+        clarification = process_clarification_turn(
+            session_id=session_id,
+            user_id=user_id,
+            user_name=user_name,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+            kb_name=kb_name,
+            query=query,
+            channel=channel,
+            has_image=has_image,
+            query_image_oss_key=query_image_oss_key,
+            reason=reason,
+            force_start=force_start,
+            workflow=workflow,
+            workflow_sources=workflow_sources,
+            continue_only=continue_only,
+        )
+    except Exception as e:
+        logger.warning(f"澄清服务记录持久化失败（不影响回答）: {e}")
+        clarification = None
+
+    if not clarification:
+        return None
+
+    answer_text = clarification.get("answer") or answer or ""
+    try:
+        from app.db import get_conversation_repository
+
+        conv_repo = get_conversation_repository()
+        if conv_repo.get_session(session_id):
+            conv_repo.add_message(
+                session_id=session_id,
+                role="user",
+                content=query,
+                query_image_oss_key=query_image_oss_key,
+            )
+            conv_repo.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=answer_text,
+                sources=[],
+                confidence=0.0,
+                used_fallback=False,
+                fallback_reason=reason or "clarification_required",
+                quality_passed=None,
+                quality_level="clarifying",
+            )
+            conv_repo.touch_session(session_id)
+    except Exception as e:
+        logger.warning(f"澄清消息持久化失败（不影响回答）: {e}")
+
+    return clarification
 
 
 def _load_kb_retrieval(collection: Optional[str]):
@@ -181,6 +303,12 @@ async def invoke_knowledge_qa(
     keyword_filter: Optional[str] = None,
     query_image_url: Optional[str] = None,
     query_image_oss_key: Optional[str] = None,
+    user_id: str = "guest_default",
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    persist: bool = True,
 ) -> dict:
     """调用 Knowledge Agent 执行 RAG 问答。"""
     if model_name not in SUPPORTED_MODELS:
@@ -196,7 +324,7 @@ async def invoke_knowledge_qa(
 
     initial_state = create_initial_state(
         query=query,
-        user_id="api_user",
+        user_id=user_id,
         session_id=session_id,
         config=_build_rag_config(
             model_name=model_name,
@@ -238,6 +366,16 @@ async def invoke_knowledge_qa(
         "conversation_turns": 1,
     }
 
+    quality_level = _extract_quality_level(result.get("answer_quality"))
+    manual_review_recommended = _needs_manual_clarification(
+        used_fallback=result.get("used_fallback", False),
+        fallback_reason=result.get("fallback_reason"),
+        quality_passed=result.get("quality_passed"),
+        confidence=result.get("confidence"),
+    )
+    if manual_review_recommended:
+        thoughts["manual_review_recommended"] = True
+
     return_data = {
         "request_id": request_id,
         "session_id": session_id,
@@ -247,21 +385,33 @@ async def invoke_knowledge_qa(
         "model": model_name,
         "thoughts": thoughts,
         "image_map": result.get("image_map") or None,
+        "finish_reason": "stop",
+        "used_fallback": result.get("used_fallback", False),
+        "fallback_reason": result.get("fallback_reason"),
+        "quality_passed": result.get("quality_passed"),
+        "quality_level": quality_level,
+        "manual_review_recommended": manual_review_recommended,
     }
 
-    _persist_conversation_messages(
-        session_id,
-        query,
-        result.get("answer") or "",
-        result.get("sources") or [],
-        result.get("confidence"),
-        query_image_oss_key,
-        used_fallback=result.get("used_fallback", False),
-        fallback_reason=result.get("fallback_reason"),
-        quality_passed=result.get("quality_passed"),
-        quality_level=_extract_quality_level(result.get("answer_quality")),
-        kb_name=kb.get("name") if kb else None,
-    )
+    if persist:
+        _persist_conversation_messages(
+            session_id,
+            query,
+            result.get("answer") or "",
+            result.get("sources") or [],
+            result.get("confidence"),
+            query_image_oss_key,
+            used_fallback=result.get("used_fallback", False),
+            fallback_reason=result.get("fallback_reason"),
+            quality_passed=result.get("quality_passed"),
+            quality_level=quality_level,
+            kb_name=kb.get("name") if kb else None,
+            user_id=user_id,
+            user_name=user_name,
+            channel=channel,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+        )
 
     return return_data
 
@@ -282,6 +432,74 @@ def _thoughts_from_state_values(vals: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def retrieve_operation_workflow(
+    *,
+    query: str,
+    model_name: str,
+    session_id: str,
+    collection: Optional[str] = None,
+    force_multi_doc: Optional[bool] = None,
+    keyword_filter: Optional[str] = None,
+    query_image_url: Optional[str] = None,
+    user_id: str = "guest_default",
+) -> Dict[str, Any]:
+    """Run retrieval/rerank for operation workflows without generating an answer."""
+    if model_name not in SUPPORTED_MODELS:
+        raise ValidationError(f"Model '{model_name}' not supported. Available: {list(SUPPORTED_MODELS.keys())}")
+
+    from agents.knowledge import get_knowledge_stream_prep_agent, create_initial_state
+    from agents.knowledge.nodes.generate import prepare_generation_context, build_sources_from_reranked
+
+    agent = get_knowledge_stream_prep_agent()
+    request_id = str(uuid.uuid4())
+    kb, rc = _load_kb_retrieval(collection)
+    initial_state = create_initial_state(
+        query=query,
+        user_id=user_id,
+        session_id=session_id,
+        config=_build_rag_config(
+            model_name=model_name,
+            kb=kb,
+            rc=rc,
+            collection=collection,
+            force_multi_doc=force_multi_doc,
+            keyword_filter=keyword_filter,
+            query_image_url=query_image_url,
+        ),
+    )
+    config = {
+        "configurable": {
+            "model": model_name,
+            "session_id": session_id,
+            "thread_id": f"{session_id}:operation-workflow",
+        }
+    }
+
+    try:
+        await agent.ainvoke(initial_state, config=config)
+        snap = await agent.aget_state(config)
+        vals = dict(snap.values)
+        ctx = prepare_generation_context(vals, config)
+        sources = build_sources_from_reranked(ctx.get("reranked_chunks") or [])
+        return {
+            "request_id": request_id,
+            "sources": sources,
+            "thoughts": _thoughts_from_state_values(vals),
+            "image_map": ctx.get("image_map") or {},
+        }
+    except Exception as exc:
+        logger.warning("Operation workflow retrieval failed; falling back to generic clarification: %s", exc)
+        return {
+            "request_id": request_id,
+            "sources": [],
+            "thoughts": {
+                "retrieval": {"chunks_retrieved": 0, "chunks_used": 0},
+                "operation_workflow_error": str(exc),
+            },
+            "image_map": {},
+        }
+
+
 async def stream_knowledge_qa_sse(
     query: str,
     model_name: str,
@@ -291,6 +509,11 @@ async def stream_knowledge_qa_sse(
     keyword_filter: Optional[str] = None,
     query_image_url: Optional[str] = None,
     query_image_oss_key: Optional[str] = None,
+    user_id: str = "guest_default",
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     Knowledge 问答 SSE：检索阶段走 LangGraph（interrupt 在 generate 前），
@@ -314,7 +537,7 @@ async def stream_knowledge_qa_sse(
 
     initial_state = create_initial_state(
         query=query,
-        user_id="api_user",
+        user_id=user_id,
         session_id=session_id,
         config=_build_rag_config(
             model_name=model_name,
@@ -399,18 +622,34 @@ async def stream_knowledge_qa_sse(
         return
 
     answer_final = final.get("answer") or ""
+    done_sources = final.get("sources") or []
+    done_confidence = final.get("confidence")
+    finish_reason = "stop"
+    manual_review_recommended = _needs_manual_clarification(
+        used_fallback=final.get("used_fallback", False),
+        fallback_reason=final.get("fallback_reason"),
+        quality_passed=final.get("quality_passed"),
+        confidence=final.get("confidence"),
+    )
+    done_thoughts = {
+        **_thoughts_from_state_values(final),
+        "clarification_required": False,
+    }
+    if manual_review_recommended:
+        done_thoughts["manual_review_recommended"] = True
+
     yield _sse(
         "done",
         {
             "request_id": request_id,
             "session_id": session_id,
             "answer": answer_final,
-            "confidence": final.get("confidence"),
-            "sources": final.get("sources") or [],
+            "confidence": done_confidence,
+            "sources": done_sources,
             "model": model_name,
-            "thoughts": _thoughts_from_state_values(final),
+            "thoughts": done_thoughts,
             "image_map": final.get("image_map") or ctx.get("image_map") or {},
-            "finish_reason": "stop",
+            "finish_reason": finish_reason,
         },
     )
 
@@ -426,4 +665,69 @@ async def stream_knowledge_qa_sse(
         quality_passed=final.get("quality_passed"),
         quality_level=_extract_quality_level(final.get("answer_quality")),
         kb_name=kb.get("name") if kb else None,
+        user_id=user_id,
+        user_name=user_name,
+        channel=channel,
+        sender_id=sender_id,
+        requester_name=requester_name or user_name,
+    )
+
+
+async def stream_clarification_sse(
+    *,
+    query: str,
+    answer: str,
+    model_name: str,
+    session_id: str,
+    kb_name: Optional[str],
+    user_id: str,
+    user_name: Optional[str],
+    channel: str,
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+    reason: Optional[str] = None,
+    force_start: bool = False,
+    workflow: Optional[Dict[str, Any]] = None,
+    workflow_sources: Optional[list] = None,
+    thoughts: Optional[Dict[str, Any]] = None,
+) -> AsyncIterator[str]:
+    request_id = str(uuid.uuid4())
+    clarification = persist_clarification_message(
+        session_id=session_id,
+        query=query,
+        answer=answer,
+        kb_name=kb_name,
+        user_id=user_id,
+        user_name=user_name,
+        channel=channel,
+        sender_id=sender_id,
+        requester_name=requester_name or user_name,
+        has_image=has_image,
+        query_image_oss_key=query_image_oss_key,
+        reason=reason,
+        force_start=force_start,
+        workflow=workflow,
+        workflow_sources=workflow_sources,
+    )
+    answer = (clarification or {}).get("answer") or answer
+    finish_reason = (clarification or {}).get("finish_reason") or "clarification"
+    payload = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "model": model_name,
+        "thoughts": {"clarification_required": True, **(thoughts or {})},
+        "sources": [],
+        "image_map": {},
+    }
+    yield _sse("meta", payload)
+    yield _sse(
+        "done",
+        {
+            **payload,
+            "answer": answer,
+            "confidence": 0.0,
+            "finish_reason": finish_reason,
+        },
     )

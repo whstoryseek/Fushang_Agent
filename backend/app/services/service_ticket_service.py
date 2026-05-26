@@ -820,6 +820,104 @@ def build_context_snapshots(sources: Optional[List[Dict[str, Any]]]) -> List[Dic
     return contexts
 
 
+def start_missing_knowledge_clarification(
+    *,
+    session_id: str,
+    user_id: str,
+    user_name: Optional[str],
+    sender_id: Optional[str],
+    requester_name: Optional[str],
+    kb_name: Optional[str],
+    query: str,
+    channel: str,
+    rag_result: Dict[str, Any],
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    repo = get_service_ticket_repository()
+    collected = _merge_collected_info(
+        {},
+        query=query,
+        has_image=has_image,
+        query_image_oss_key=query_image_oss_key,
+        requester_name=requester_name or user_name,
+        sender_id=sender_id,
+        user_id=user_id,
+    )
+    required = _required_clarification_fields("knowledge_missing", query)
+    missing = _missing_fields(required, collected)
+    answer = _next_clarification_question(
+        1,
+        "knowledge_missing",
+        missing,
+        workflow_summary="",
+        field_labels={},
+    )
+    clarification = {
+        "intent_class": INTENT_MISSING_KNOWLEDGE,
+        "reason": "knowledge_missing",
+        "original_query": query,
+        "required_fields": required,
+        "missing_fields": missing,
+        "workflow_found": False,
+        "workflow_summary": "",
+        "field_labels": {},
+        "workflow_sources": [],
+        "fallback_used": True,
+        "kb_result": {
+            "hit": False,
+            "fallback_reason": rag_result.get("fallback_reason"),
+            "confidence": rag_result.get("confidence"),
+            "answer": rag_result.get("answer"),
+        },
+        "image_analysis": {
+            "has_image": bool(has_image or query_image_oss_key),
+            "categories": [],
+        },
+        "collected": collected,
+        "turns": [
+            {
+                "round": 1,
+                "query": query,
+                "answer": answer,
+                "image_key": query_image_oss_key,
+                "status": "clarifying",
+            }
+        ],
+        "completion_status": COMPLETION_INCOMPLETE,
+        "exit_reason": "",
+        "ready_for_manual": False,
+    }
+    ticket = repo.create_with_contexts(
+        session_id=session_id,
+        user_id=user_id or "guest_default",
+        user_name=user_name,
+        kb_name=kb_name,
+        query=query,
+        answer=answer,
+        status="clarifying",
+        confidence=rag_result.get("confidence"),
+        fallback_reason="knowledge_missing",
+        quality_level="clarifying",
+        sources=rag_result.get("sources") or [],
+        channel=channel or "web",
+        sender_id=sender_id,
+        requester_name=requester_name or user_name,
+        clarification_round=1,
+        clarification=clarification,
+        contexts=build_context_snapshots(rag_result.get("sources") or []),
+    )
+    return {
+        "ticket_id": ticket["id"] if ticket else None,
+        "status": "clarifying",
+        "answer": answer,
+        "clarification_round": 1,
+        "clarification": clarification,
+        "confidence": 0.0,
+        "finish_reason": "clarification",
+    }
+
+
 def record_ticket(
     *,
     user_id: str,
