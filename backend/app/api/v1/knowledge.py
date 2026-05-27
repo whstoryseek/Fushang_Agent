@@ -21,6 +21,7 @@ from app.services.service_ticket_service import (
     INTENT_AMBIGUOUS,
     INTENT_MISSING_KNOWLEDGE,
     INTENT_OPERATION,
+    analyze_operation_workflow_with_llm,
     classify_ticket_intent_with_llm,
     process_ticket_clarification_turn,
     should_start_missing_knowledge_flow,
@@ -104,6 +105,20 @@ def _normal_response(result: dict) -> KnowledgeResponse:
     )
 
 
+def lookup_operation_workflow(
+    *,
+    query: str,
+    kb_name: str | None,
+    decision: dict,
+    rag_result: dict | None,
+) -> dict:
+    return analyze_operation_workflow_with_llm(
+        query=query,
+        decision=decision,
+        rag_result=rag_result,
+    )
+
+
 def _create_ticket_result(
     *,
     session_id: str,
@@ -114,10 +129,12 @@ def _create_ticket_result(
     has_image: bool,
     query_image_oss_key: str | None,
     rag_result: dict | None = None,
+    workflow: dict | None = None,
 ) -> dict | None:
-    workflow = None
-    if decision.get("intent_class") == INTENT_OPERATION:
+    if workflow is None and decision.get("intent_class") == INTENT_OPERATION:
         workflow = {"workflow_found": False, "required_fields": []}
+    if workflow and workflow.get("question"):
+        decision = {**decision, "question": workflow.get("question")}
     return process_ticket_clarification_turn(
         session_id=session_id,
         user_id=user_id,
@@ -202,7 +219,19 @@ async def knowledge_qa(request: KnowledgeRequest, user_id: str = Depends(get_req
         classifier_task.add_done_callback(_consume_background_task_exception)
 
     if _is_pre_rag_ticket_decision(decision):
-        await _cancel_rag_task(rag_task)
+        rag_result_for_workflow = None
+        workflow = None
+        if decision.get("intent_class") == INTENT_OPERATION:
+            with contextlib.suppress(Exception):
+                rag_result_for_workflow = await rag_task
+            workflow = lookup_operation_workflow(
+                query=request.query,
+                kb_name=request.collection or None,
+                decision=decision,
+                rag_result=rag_result_for_workflow,
+            )
+        else:
+            await _cancel_rag_task(rag_task)
         ticket_result = _create_ticket_result(
             session_id=session_id,
             user_id=user_id,
@@ -211,6 +240,7 @@ async def knowledge_qa(request: KnowledgeRequest, user_id: str = Depends(get_req
             decision=decision,
             has_image=has_image,
             query_image_oss_key=query_image_oss_key,
+            workflow=workflow,
         )
         if ticket_result:
             return _ticket_response(
@@ -221,6 +251,37 @@ async def knowledge_qa(request: KnowledgeRequest, user_id: str = Depends(get_req
             )
 
     result = await rag_task
+
+    if decision is None and classifier_task.done():
+        with contextlib.suppress(Exception):
+            decision = classifier_task.result()
+    if _is_pre_rag_ticket_decision(decision):
+        workflow = None
+        if decision.get("intent_class") == INTENT_OPERATION:
+            workflow = lookup_operation_workflow(
+                query=request.query,
+                kb_name=request.collection or None,
+                decision=decision,
+                rag_result=result,
+            )
+        ticket_result = _create_ticket_result(
+            session_id=session_id,
+            user_id=user_id,
+            kb_name=request.collection or None,
+            query=request.query,
+            decision=decision,
+            has_image=has_image,
+            query_image_oss_key=query_image_oss_key,
+            workflow=workflow,
+        )
+        if ticket_result:
+            return _ticket_response(
+                ticket_result=ticket_result,
+                decision=decision,
+                session_id=session_id,
+                model_name=model_name,
+                request_id=result.get("request_id"),
+            )
 
     if should_start_missing_knowledge_flow(result):
         missing_decision = await asyncio.to_thread(

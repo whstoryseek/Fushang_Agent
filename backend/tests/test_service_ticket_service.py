@@ -14,6 +14,7 @@ if "psycopg2" not in sys.modules:
     sys.modules["psycopg2.extras"] = psycopg2_module.extras
 
 from app.services.service_ticket_service import (
+    analyze_operation_workflow_with_llm,
     INTENT_AMBIGUOUS,
     INTENT_MISSING_KNOWLEDGE,
     INTENT_NORMAL,
@@ -319,6 +320,63 @@ class ServiceTicketClassifierTests(unittest.TestCase):
         self.assertEqual(result["intent_class"], INTENT_OPERATION)
         self.assertEqual(result["fields"], {})
         self.assertEqual(result["missing_fields"], [])
+
+    @patch("app.services.service_ticket_service.get_llm_service")
+    def test_operation_workflow_analysis_uses_mini_llm_and_strict_json_contract(self, mock_get_llm):
+        llm = MagicMock()
+        llm.responses_text.return_value = json.dumps(
+            {
+                "workflow_found": True,
+                "confidence": 0.93,
+                "workflow_summary": "微信子商户号开户 SOP",
+                "required_fields": ["business_license", "legal_person", "bank_account"],
+                "required_field_details": [
+                    {"key": "business_license", "label": "营业执照", "reason": "SOP 要求准备营业执照"},
+                    {"key": "legal_person", "label": "法人信息", "reason": "SOP 要求填写法人信息"},
+                    {"key": "bank_account", "label": "银行账户", "reason": "SOP 要求填写结算账户"},
+                ],
+                "question": "请补充营业执照、法人信息和银行账户信息。",
+                "workflow_sources": [{"file_name": "开通微信子商户号.docx", "chunk_index": 0}],
+                "rationale_brief": "候选内容包含准备资料和开户流程",
+            },
+            ensure_ascii=False,
+        )
+        mock_get_llm.return_value = llm
+
+        result = analyze_operation_workflow_with_llm(
+            query="帮我开通微信子商户号",
+            decision={"intent_class": "A", "fields": {"issue_detail": "开通微信子商户号"}},
+            rag_result={
+                "answer": "开通微信子商户号需要营业执照、法人信息和银行账户。",
+                "sources": [
+                    {
+                        "file_name": "开通微信子商户号.docx",
+                        "chunk_index": 0,
+                        "content": "开户流程：准备营业执照、法人信息、银行账户，进入门店收款码管理提交。",
+                    }
+                ],
+            },
+        )
+
+        self.assertTrue(result["workflow_found"])
+        self.assertIn("business_license", result["required_fields"])
+        self.assertEqual(result["question"], "请补充营业执照、法人信息和银行账户信息。")
+        kwargs = llm.responses_text.call_args.kwargs
+        self.assertEqual(kwargs["model"], "doubao-seed-2-0-mini-260428")
+        self.assertEqual(kwargs["max_retries"], 0)
+        prompt = llm.responses_text.call_args.args[0][0]["content"]
+        self.assertIn("只能输出一个合法 JSON 对象", prompt)
+        self.assertIn("不能根据关键词、常识或用户意图自行猜测", prompt)
+
+    def test_operation_workflow_analysis_without_candidates_returns_no_workflow(self):
+        result = analyze_operation_workflow_with_llm(
+            query="帮我开通微信子商户号",
+            decision={"intent_class": "A"},
+            rag_result=None,
+        )
+
+        self.assertFalse(result["workflow_found"])
+        self.assertEqual(result["required_fields"], [])
 
 
 class FakeClarificationRepo:

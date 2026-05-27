@@ -16,6 +16,7 @@ INTENT_NORMAL = "D"
 CLASSIFIER_MODEL = getattr(settings, "operation_classifier_model", "doubao-seed-2-0-mini-260428")
 CLASSIFIER_MAX_TOKENS = 300
 CLASSIFIER_TIMEOUT = min(float(getattr(settings, "operation_classifier_timeout", 1.2)), 1.2)
+WORKFLOW_ANALYSIS_MAX_TOKENS = 700
 
 _VALID_INTENTS = {
     INTENT_OPERATION,
@@ -200,6 +201,175 @@ def classify_ticket_intent_with_llm(
     except Exception as exc:
         logger.warning("ticket intent classifier failed: %s", exc)
         return _fallback_decision(query, has_image)
+
+
+def _workflow_default(reason: str = "workflow_analysis_failed") -> Dict[str, Any]:
+    return {
+        "workflow_found": False,
+        "confidence": 0.0,
+        "workflow_summary": "",
+        "required_fields": [],
+        "required_field_details": [],
+        "question": "",
+        "workflow_sources": [],
+        "rationale_brief": reason,
+        "source": "fallback",
+    }
+
+
+def _workflow_candidate_payload(rag_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(rag_result, dict):
+        return {"answer": "", "sources": []}
+    sources = []
+    for source in (rag_result.get("sources") or [])[:6]:
+        if not isinstance(source, dict):
+            continue
+        sources.append(
+            {
+                "file_name": source.get("file_name") or source.get("title"),
+                "chunk_index": source.get("chunk_index"),
+                "content": str(source.get("content") or "")[:900],
+                "score": source.get("score"),
+            }
+        )
+    return {
+        "answer": str(rag_result.get("answer") or "")[:1200],
+        "used_fallback": rag_result.get("used_fallback"),
+        "fallback_reason": rag_result.get("fallback_reason"),
+        "sources": sources,
+    }
+
+
+def _workflow_analysis_prompt(
+    query: str,
+    decision: Dict[str, Any],
+    rag_result: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是工单系统的 SOP 判定与信息字段抽取器，只能输出一个合法 JSON 对象，禁止 Markdown、禁止解释过程。"
+                "你必须只依据输入的知识库候选内容判断是否存在标准操作流程，不能根据关键词、常识或用户意图自行猜测。"
+                "判定 workflow_found=true 的必要条件：候选内容中存在与用户要办理的具体动作高度一致的流程，且包含入口、步骤、"
+                "准备资料、提交方式、处理规则或注意事项中的至少两类信息。仅仅提到相同名词、只有概念介绍、只有咨询答案，必须判为 false。"
+                "如果存在 SOP，你要抽取后台办理或继续收集工单前必须向用户确认/收集的字段；字段必须来自候选内容或办理动作的明确要求。"
+                "字段 key 使用稳定英文蛇形命名，例如 issue_detail, store, account, phone, business_license, legal_person, "
+                "legal_person_id_card, bank_account, settlement_card, permission, order_id, screenshot, error_message。"
+                "required_fields 必须是 key 字符串数组；required_field_details 必须说明 key、中文 label、为什么需要。"
+                "question 必须是一句面向用户的中文追问，逐项列出缺失信息；如果没有 SOP 或无需补充则为空字符串。"
+                "workflow_sources 只能引用输入候选中的 file_name 与 chunk_index。"
+                "输出 JSON schema：{"
+                "\"workflow_found\": boolean, \"confidence\": number, \"workflow_summary\": string, "
+                "\"required_fields\": string[], \"required_field_details\": [{\"key\": string, \"label\": string, \"reason\": string}], "
+                "\"question\": string, \"workflow_sources\": [{\"file_name\": string, \"chunk_index\": number|null}], "
+                "\"rationale_brief\": string}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "user_query": query or "",
+                    "intent_decision": {
+                        "intent_class": decision.get("intent_class"),
+                        "fields": decision.get("fields") if isinstance(decision.get("fields"), dict) else {},
+                        "missing_fields": decision.get("missing_fields")
+                        if isinstance(decision.get("missing_fields"), list)
+                        else [],
+                        "question": decision.get("question") or "",
+                    },
+                    "knowledge_candidates": _workflow_candidate_payload(rag_result),
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+
+def _normalize_workflow_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    workflow_found = bool(payload.get("workflow_found"))
+    if not workflow_found:
+        result = _workflow_default("llm_no_workflow")
+        result["confidence"] = _as_float(payload.get("confidence"))
+        result["rationale_brief"] = str(payload.get("rationale_brief") or "llm_no_workflow")
+        result["source"] = "llm"
+        return result
+
+    raw_details = payload.get("required_field_details")
+    details = raw_details if isinstance(raw_details, list) else []
+    normalized_details = []
+    field_keys = []
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        if key not in field_keys:
+            field_keys.append(key)
+        normalized_details.append(
+            {
+                "key": key,
+                "label": str(item.get("label") or key),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    raw_fields = payload.get("required_fields")
+    if isinstance(raw_fields, list):
+        for field in raw_fields:
+            key = str(field or "").strip()
+            if key and key not in field_keys:
+                field_keys.append(key)
+    if "issue_detail" not in field_keys:
+        field_keys.insert(0, "issue_detail")
+
+    sources = []
+    for source in payload.get("workflow_sources") or []:
+        if isinstance(source, dict):
+            sources.append(
+                {
+                    "file_name": source.get("file_name"),
+                    "chunk_index": source.get("chunk_index"),
+                }
+            )
+
+    return {
+        "workflow_found": True,
+        "confidence": _as_float(payload.get("confidence")),
+        "workflow_summary": str(payload.get("workflow_summary") or ""),
+        "required_fields": field_keys,
+        "required_field_details": normalized_details,
+        "question": str(payload.get("question") or ""),
+        "workflow_sources": sources,
+        "rationale_brief": str(payload.get("rationale_brief") or ""),
+        "source": "llm",
+    }
+
+
+def analyze_operation_workflow_with_llm(
+    *,
+    query: str,
+    decision: Dict[str, Any],
+    rag_result: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    candidates = _workflow_candidate_payload(rag_result)
+    if not candidates.get("answer") and not candidates.get("sources"):
+        return _workflow_default("no_knowledge_candidates")
+    try:
+        text = get_llm_service().responses_text(
+            _workflow_analysis_prompt(query, decision, rag_result),
+            model=CLASSIFIER_MODEL,
+            temperature=0.0,
+            max_tokens=WORKFLOW_ANALYSIS_MAX_TOKENS,
+            timeout=CLASSIFIER_TIMEOUT,
+            max_retries=0,
+        )
+        payload = _extract_json_payload(text)
+        return _normalize_workflow_payload(payload)
+    except Exception as exc:
+        logger.warning("operation workflow analyzer failed: %s", exc)
+        return _workflow_default()
 
 
 MAX_CLARIFICATION_ROUNDS = {

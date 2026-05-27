@@ -103,17 +103,15 @@ class KnowledgeApiTicketRaceTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_called_once()
         process_ticket.assert_not_called()
 
-    async def test_a_classifier_before_deadline_returns_ticket_response(self):
+    async def test_a_classifier_before_deadline_uses_rag_candidates_for_llm_sop_analysis(self):
         rag_started = asyncio.Event()
-        rag_cancelled = asyncio.Event()
 
-        async def slow_rag(**kwargs):
+        async def fake_rag(**kwargs):
             rag_started.set()
-            try:
-                await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                rag_cancelled.set()
-                raise
+            return _rag_result(
+                answer="SOP says prepare permission applicant and store.",
+                sources=[{"file_name": "permission-sop.docx", "content": "prepare applicant and store"}],
+            )
 
         decision = {
             "intent_class": "A",
@@ -123,16 +121,24 @@ class KnowledgeApiTicketRaceTests(unittest.IsolatedAsyncioTestCase):
             "question": "",
         }
         ticket = {
-            "answer": "ticket created",
+            "answer": "please provide applicant and store",
             "confidence": 0.0,
-            "finish_reason": "manual_ticket_created",
-            "clarification": {"intent_class": "A"},
+            "finish_reason": "clarification",
+            "clarification": {"intent_class": "A", "workflow_found": True},
         }
 
         with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-1"), patch(
             "app.api.v1.knowledge.invoke_knowledge_qa",
-            side_effect=slow_rag,
+            side_effect=fake_rag,
         ), patch("app.api.v1.knowledge.classify_ticket_intent_with_llm", return_value=decision), patch(
+            "app.api.v1.knowledge.lookup_operation_workflow",
+            return_value={
+                "workflow_found": True,
+                "required_fields": ["issue_detail", "store"],
+                "question": "please provide applicant and store",
+                "workflow_sources": [{"file_name": "permission-sop.docx"}],
+            },
+        ) as lookup, patch(
             "app.api.v1.knowledge.process_ticket_clarification_turn",
             return_value=ticket,
         ) as process_ticket, patch("app.api.v1.knowledge.persist_knowledge_result") as persist:
@@ -142,10 +148,54 @@ class KnowledgeApiTicketRaceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(rag_started.is_set())
-        self.assertTrue(rag_cancelled.is_set())
-        self.assertEqual(response.answer, "ticket created")
-        self.assertEqual(response.finish_reason, "manual_ticket_created")
+        self.assertEqual(response.answer, "please provide applicant and store")
+        self.assertEqual(response.finish_reason, "clarification")
         self.assertTrue(response.thoughts["clarification_required"])
+        lookup.assert_called_once()
+        self.assertEqual(lookup.call_args.kwargs["rag_result"]["sources"][0]["file_name"], "permission-sop.docx")
+        process_ticket.assert_called_once()
+        self.assertTrue(process_ticket.call_args.kwargs["workflow"]["workflow_found"])
+        persist.assert_not_called()
+
+    async def test_classifier_finishing_after_deadline_but_before_rag_can_still_intercept(self):
+        def slightly_slow_classifier(*args, **kwargs):
+            time.sleep(0.03)
+            return {
+                "intent_class": "C",
+                "needs_ticket_flow": True,
+                "fields": {},
+                "missing_fields": ["issue_detail"],
+                "question": "Please clarify the business scenario.",
+            }
+
+        async def slower_rag(**kwargs):
+            await asyncio.sleep(0.08)
+            return _rag_result()
+
+        ticket = {
+            "answer": "Please clarify the business scenario.",
+            "confidence": 0.0,
+            "finish_reason": "clarification",
+            "clarification": {"intent_class": "C"},
+        }
+
+        with patch("app.api.v1.knowledge.TICKET_CLASSIFIER_INTERCEPT_TIMEOUT", 0.01), patch(
+            "app.api.v1.knowledge.conversation_service.ensure_knowledge_session",
+            return_value="session-1",
+        ), patch("app.api.v1.knowledge.invoke_knowledge_qa", side_effect=slower_rag), patch(
+            "app.api.v1.knowledge.classify_ticket_intent_with_llm",
+            side_effect=slightly_slow_classifier,
+        ), patch(
+            "app.api.v1.knowledge.process_ticket_clarification_turn",
+            return_value=ticket,
+        ) as process_ticket, patch("app.api.v1.knowledge.persist_knowledge_result") as persist:
+            response = await knowledge.knowledge_qa(
+                KnowledgeRequest(query="unclear thing", session_id="session-1"),
+                user_id="store-1",
+            )
+
+        self.assertEqual(response.finish_reason, "clarification")
+        self.assertEqual(response.thoughts["clarification"]["intent_class"], "C")
         process_ticket.assert_called_once()
         persist.assert_not_called()
 
