@@ -1,30 +1,63 @@
-# Frontend Template Split Design
+# 前端模板拆分迁移设计
 
-## Goal
+## 目标
 
-Replace the current mixed Q&A frontend with a new template-driven user frontend, build a separate admin frontend in the same visual language, and keep the backend API surface and backend feature logic unchanged.
+在不改动后端 API 形态、后端功能逻辑和后端业务代码的前提下：
 
-The approved constraints are:
+- 用新的模板风格重做当前用户问答前端
+- 单独建设一个管理员前端
+- 两个新前端都接入现有后端接口
+- 迁移期间保留现有 `frontend/` 作为回退方案
 
-- keep all existing backend endpoints, request contracts, response contracts, and business logic untouched
-- preserve all current user-side capabilities
-- preserve all current admin-side capabilities
-- place both new frontends inside the current repository
-- keep the legacy `frontend/` as a temporary fallback during migration
+本次任务的本质是“前端替换与拆分”，不是“系统后端重构”。
 
-## Existing Context
+已确认的硬约束如下：
 
-The repository currently mixes user and admin experiences inside a single Vue application under `frontend/`:
+- 后端接口地址、请求方法、请求体字段、响应体字段都不能改
+- 后端 Python 代码和功能逻辑都不能改
+- 用户端现有能力要全部保留
+- 管理端现有能力要全部保留
+- 两个新前端都放在当前仓库内
+- 旧的混合前端暂时保留，直到两个新前端验收通过
 
-- `frontend/src/App.vue` mounts both the chat experience and all admin modules in one shell
-- `frontend/src/components/SimpleChat.vue` owns the current user-side knowledge-base Q&A flow, session sidebar, image query support, and streaming answer rendering
-- `frontend/src/components/UserHistory.vue` provides the user conversation history page
-- `frontend/src/components/AdminPanel.vue`, `frontend/src/components/admin/AdminDataImport.vue`, `frontend/src/components/admin/AdminDataView.vue`, and `frontend/src/components/admin/AdminServiceTickets.vue` provide the current admin features
-- `frontend/src/services/api.js` already captures the current `/api/v1/*` contracts for user Q&A and admin ticket/collection APIs
-- `frontend/src/services/auth.js` already captures the admin auth lifecycle and the guest/header behavior required by the backend
-- `frontend/src/utils/entryIdentity.mjs` and related helpers carry store-entry identity headers that the backend already understands
+## 现状背景
 
-The provided template project at `C:/Users/story/Desktop/扶商智能体知识库/前端重构/projects` is a user-facing visual shell built with Vue 3, TypeScript, Vite, and Tailwind CSS v4. It currently contains UI-only mock components:
+当前仓库里的前端是一个用户端和管理端混合在一起的 Vue 应用，位于 `frontend/`：
+
+- `frontend/src/App.vue`
+  - 当前总入口，同时挂载问答页、历史页和管理员各模块
+- `frontend/src/components/SimpleChat.vue`
+  - 当前用户端知识库问答主界面
+  - 包含会话侧边栏、流式回答、图片提问、来源展示等能力
+- `frontend/src/components/UserHistory.vue`
+  - 当前用户端历史记录页面
+- `frontend/src/components/AdminPanel.vue`
+  - 当前管理端知识库列表、创建、配置等能力
+- `frontend/src/components/admin/AdminDataImport.vue`
+  - 当前管理端数据导入能力
+- `frontend/src/components/admin/AdminDataView.vue`
+  - 当前管理端数据查看能力
+- `frontend/src/components/admin/AdminServiceTickets.vue`
+  - 当前管理端服务记录/工单能力
+- `frontend/src/services/api.js`
+  - 当前 `/api/v1/*` 接口调用封装，覆盖用户问答与部分管理端接口
+- `frontend/src/services/auth.js`
+  - 当前管理员登录、登出、`me`、token 持久化以及游客请求头逻辑
+- `frontend/src/utils/entryIdentity.mjs`
+  - 当前门店/入口身份透传逻辑
+
+你提供的前端模板位于：
+
+`C:/Users/story/Desktop/扶商智能体知识库/前端重构/projects`
+
+这是一个偏用户端的 UI 模板工程，技术栈是：
+
+- Vue 3
+- TypeScript
+- Vite
+- Tailwind CSS v4
+
+模板当前主要包含这些 UI 骨架组件：
 
 - `src/App.vue`
 - `src/components/AppHeader.vue`
@@ -33,64 +66,74 @@ The provided template project at `C:/Users/story/Desktop/扶商智能体知识�
 - `src/components/WelcomeScreen.vue`
 - `src/components/InputArea.vue`
 
-The template defines the target visual language:
+模板已经明确了目标视觉语言：
 
-- restrained, high-whitespace chat layout
-- indigo-primary palette on very light surfaces
-- rounded cards and bubbles
-- soft interaction states instead of heavy enterprise chrome
+- 留白充足
+- 浅色背景
+- 靛蓝色主色
+- 柔和圆角
+- 轻量交互反馈
+- 不走传统厚重后台风格
 
-The admin frontend should follow that same style rather than defaulting to a dense traditional dashboard aesthetic.
+管理员前端也要沿用这套气质，而不是做成传统深色、厚边框、高密度的管理台。
 
-## Recommended Approach
+## 推荐方案
 
-Create two new independent frontend applications in the current repository:
+在当前仓库中新增两个独立前端项目：
 
-- `frontend-user/` for the end-user Q&A experience
-- `frontend-admin/` for the administrator experience
+- `frontend-user/`
+  - 面向最终用户的问答前端
+- `frontend-admin/`
+  - 面向管理员的后台前端
 
-Both applications should call the existing backend APIs directly under `/api/v1/*`. This is a frontend-only migration, not an API redesign or backend refactor.
+两个新前端都继续直接调用现有后端的 `/api/v1/*` 接口。
 
-The migration should prefer low-risk duplication over premature abstraction:
+这次迁移遵循“稳定优先、低风险优先”的原则：
 
-- each new frontend keeps its own service layer
-- stable logic from the legacy frontend may be copied and adapted into the new applications where needed
-- no shared package should be introduced in this phase unless it becomes necessary to preserve behavior exactly
+- 本阶段不强行抽共享 npm 包
+- 两个新前端各自保留自己的 service 层
+- 可以从旧前端复制稳定逻辑并按需整理
+- 先保证功能对齐和接口对齐，再考虑后续代码抽象
 
-This keeps the change focused on replacing the presentation layer while reducing risk from cross-project build tooling or package extraction.
+这样做的原因是：
 
-## Target Architecture
+- 你明确要求不能动后端
+- 当前旧前端已经将用户端和管理端混在一起
+- 当前工作区还存在未提交变更
+- 先独立落地两个新前端，比顺手做大型工程重构更稳
 
-### Application Split
+## 目标架构
 
-`frontend-user/` is responsible for:
+### 应用拆分
 
-- knowledge-base Q&A
-- streaming answer rendering
-- session list and session recovery
-- image-based question submission
-- user conversation history
-- store-entry identity propagation
+`frontend-user/` 负责：
 
-`frontend-admin/` is responsible for:
+- 知识库问答
+- 流式回答展示
+- 会话列表与会话恢复
+- 图片提问
+- 用户历史记录
+- 门店/入口身份透传
 
-- admin login and session persistence
-- knowledge-base collection management
-- collection creation and retrieval configuration
-- data import workflows
-- data view workflows
-- service ticket browsing and handling
-- document, chunk, category, and graph-related admin tools currently exposed through the legacy admin UI
+`frontend-admin/` 负责：
 
-The legacy `frontend/` remains in place during implementation as:
+- 管理员登录与登录态保持
+- 知识库列表与管理
+- 知识库创建与检索配置
+- 数据导入
+- 数据查看
+- 服务记录/工单处理
+- 当前管理端已经暴露的文档、chunk、类目、图谱等工具能力
 
-- an interface contract reference
-- a behavior reference for parity checks
-- a rollback option until both new frontends are validated
+旧的 `frontend/` 在迁移期间继续保留，承担三种作用：
 
-### User Frontend Structure
+- 作为接口契约对照物
+- 作为行为对照物
+- 作为回退方案
 
-`frontend-user/` should be based on the provided template structure, expanded only where current behavior requires it. The intended structure is:
+### 用户前端结构
+
+`frontend-user/` 以模板工程为视觉基础，在此之上接入当前真实业务状态。建议结构如下：
 
 ```text
 frontend-user/
@@ -119,18 +162,22 @@ frontend-user/
       conversationParams.ts
 ```
 
-The template components stay visually recognizable, but their state becomes real:
+模板组件的职责演进如下：
 
-- `AppSidebar.vue` should evolve from mock history into the real knowledge session list and search affordance
-- `ChatArea.vue` should render real conversation messages, stream updates, source blocks, confidence metadata, and images
-- `InputArea.vue` should submit real text and image payloads, preserve enter/shift-enter behavior, and surface disabled states from the current product rules
-- `WelcomeScreen.vue` should remain the first-run empty state and quick-prompt entry point
+- `AppSidebar.vue`
+  - 从模板中的假历史记录，演进为真实会话列表和搜索入口
+- `ChatArea.vue`
+  - 从模板中的假消息流，演进为真实对话渲染、流式增量、来源信息、置信信息和图片展示
+- `InputArea.vue`
+  - 从模板中的演示输入框，演进为真实文本发送、图片上传、回车发送、禁用态与错误态处理
+- `WelcomeScreen.vue`
+  - 保留为空状态欢迎页和快捷提问入口
 
-The user frontend should not contain admin login or admin navigation.
+用户前端中不再包含管理员登录和管理员导航。
 
-### Admin Frontend Structure
+### 管理员前端结构
 
-`frontend-admin/` should use the same visual language but a structure optimized for management flows:
+`frontend-admin/` 保持同一套视觉气质，但页面结构要针对后台操作进行组织。建议结构如下：
 
 ```text
 frontend-admin/
@@ -163,228 +210,234 @@ frontend-admin/
       adminConfig.ts
 ```
 
-The admin app should preserve all legacy admin capabilities, but reorganize them into a dedicated shell:
+管理员前端要保留现有全部后台能力，但展示方式改为独立后台壳：
 
-- a separate admin login flow
-- a dedicated admin sidebar
-- a top bar with system state and current admin identity
-- page-level cards, drawers, tables, and forms styled to match the template’s softness and spacing
+- 独立管理员登录流程
+- 独立管理员侧边栏
+- 顶部状态栏与管理员身份展示
+- 页面级卡片、表格、抽屉、表单统一采用模板风格表达
 
-The admin UI should keep template aesthetics as the first priority:
+管理员前端的视觉优先级必须服从模板气质：
 
-- light surfaces
-- restrained borders
-- rounded cards
-- minimal but clear state color usage
-- no heavy dark dashboard treatment
+- 浅色背景
+- 轻边框
+- 柔和圆角
+- 节制的状态色
+- 避免厚重、强对比、传统企业后台风
 
-## Capability Mapping
+## 功能映射
 
-### User Capability Mapping
+### 用户端功能映射
 
-The user app should preserve and migrate the following legacy behaviors:
+`frontend-user/` 需要完整承接以下旧能力：
 
 - `frontend/src/components/SimpleChat.vue`
-  - knowledge-only chat mode
-  - current knowledge collection selection behavior
-  - SSE consumption from `/api/v1/knowledge/stream`
-  - source list expansion
-  - image query upload and preview
-  - session creation, switching, deletion, and restoration
+  - 知识库问答主流程
+  - 知识库选择逻辑
+  - `/api/v1/knowledge/stream` 的 SSE 消费逻辑
+  - 来源信息展开
+  - 图片提问上传与预览
+  - 会话创建、切换、删除、恢复
 - `frontend/src/components/UserHistory.vue`
-  - user-visible history browsing and resume behavior
+  - 用户历史记录页
+  - 从历史记录恢复会话
 - `frontend/src/services/api.js`
   - `knowledgeQuery`
   - `knowledgeQueryStream`
   - `listCollections`
-  - image resolution helpers if the user UI depends on them
+  - 如果用户端依赖图片解析辅助接口，也要原样承接
 - `frontend/src/utils/entryIdentity.mjs`
-  - guest/store entry identification and request header forwarding
+  - 游客/门店入口身份识别
+  - 请求头透传逻辑
 
-Admin-only features currently embedded in the user shell should be removed from the user app.
+当前混在用户壳里的管理员功能，都要从用户前端移除。
 
-### Admin Capability Mapping
+### 管理端功能映射
 
-The admin app should preserve and migrate the following legacy behaviors:
+`frontend-admin/` 需要完整承接以下旧能力：
 
 - `frontend/src/services/auth.js`
-  - login
-  - logout
+  - 登录
+  - 登出
   - `me`
-  - token persistence
-  - auth-expired handling
+  - token 持久化
+  - 登录过期处理
 - `frontend/src/components/AdminPanel.vue`
-  - knowledge-base list
-  - knowledge-base creation
-  - retrieval configuration
-  - config information display
+  - 知识库列表
+  - 知识库创建
+  - 检索配置
+  - 配置信息展示
 - `frontend/src/components/admin/AdminDataImport.vue`
-  - document upload
-  - Excel category upload
+  - 文档上传
+  - Excel 类目上传
 - `frontend/src/components/admin/AdminDataView.vue`
-  - collection-scoped data inspection
-  - chunk/graph/document views currently reachable from that flow
+  - 按知识库查看数据
+  - 关联的 chunk/图谱/文档视图
 - `frontend/src/components/admin/AdminServiceTickets.vue`
-  - service ticket list
-  - filters, stats, detail panes, edit actions, chunk patching, and re-vectorization
+  - 服务记录/工单列表
+  - 筛选、统计、详情、编辑、chunk 修补、重新向量化
 - `frontend/src/components/doc/*`
-  - all document-management child workflows used by the admin experience
+  - 当前后台依赖的全部文档管理子流程
 
-No admin capability should be dropped in this migration.
+本次迁移不允许删减任何管理员能力。
 
-## Data Flow and API Integration
+## 数据流与接口接入原则
 
-Both new frontends must preserve backend contracts exactly.
+两个新前端都必须严格保持现有后端契约不变。
 
-### Shared integration rules
+### 通用规则
 
-- keep the `/api/v1/*` base path unchanged
-- keep the current request methods unchanged
-- keep payload field names unchanged
-- keep auth header behavior unchanged
-- keep guest/store-entry header behavior unchanged
-- keep SSE parsing behavior unchanged for streaming answers
-- keep current tolerance for missing optional fields unchanged
+- `/api/v1/*` 基础路径不变
+- 请求方法不变
+- 请求体字段名不变
+- 响应消费方式不随意改语义
+- 鉴权头逻辑不变
+- 游客/门店入口头部透传逻辑不变
+- SSE 事件消费协议不变
+- 现有可选字段容错方式不变
 
-### User-side request flow
+### 用户端请求流
 
-For user chat:
+用户提问时：
 
-- the user sends text-only or text-plus-image input
-- the user app builds the same payload shape currently accepted by `/api/v1/knowledge` or `/api/v1/knowledge/stream`
-- the streaming parser keeps the current `meta`, `delta`, `done`, and `error` handling contract
-- the UI reflects incremental answer updates without changing server behavior
+- 前端支持纯文本提问
+- 前端支持文本加图片提问
+- 发送到 `/api/v1/knowledge` 或 `/api/v1/knowledge/stream` 的 payload 结构必须与旧前端一致
+- SSE 解析继续保留 `meta`、`delta`、`done`、`error` 的处理方式
+- UI 只重做展示，不改变服务端流式行为
 
-For user history and session flows:
+用户历史与会话相关流程：
 
-- the new UI should reuse the current session behaviors already encoded in the legacy frontend
-- if the current frontend stores or derives any session identifiers locally, that mechanism should be preserved unless the new UI can match the same behavior with simpler state handling
+- 会话 ID、恢复逻辑和相关前端状态机制要与旧前端行为保持一致
+- 如果旧前端对某些本地状态有特殊约定，应优先复用相同行为
 
-### Admin-side request flow
+### 管理端请求流
 
-For admin access:
+管理员登录相关：
 
-- login continues to call `/api/v1/auth/login`
-- current-user continues to call `/api/v1/auth/me`
-- logout continues to call `/api/v1/auth/logout`
+- 登录继续调用 `/api/v1/auth/login`
+- 当前用户继续调用 `/api/v1/auth/me`
+- 登出继续调用 `/api/v1/auth/logout`
 
-For admin data flows:
+管理员业务相关：
 
-- collections continue to use `/api/v1/admin/collections`
-- service tickets continue to use the existing `/api/v1/admin/service-tickets*` endpoints
-- document and chunk tools continue to use their existing upload/list/update/delete endpoints
+- 知识库集合继续使用 `/api/v1/admin/collections`
+- 服务记录/工单继续使用现有 `/api/v1/admin/service-tickets*`
+- 文档、chunk、导入、删除、更新等继续走现有接口
 
-The admin frontend may reorganize screens, but it must not reinterpret or reshape backend responses in a way that changes visible behavior incorrectly.
+管理端可以重组页面，但不能擅自重新定义后端返回值的业务含义。
 
-## Styling and Interaction Rules
+## 样式与交互规则
 
-The provided template defines the baseline style for both new applications. The migration should keep that style coherent across user and admin surfaces.
+模板工程定义了两个新前端共同遵循的视觉基线。
 
-Required styling principles:
+必须保持的样式原则：
 
-- visual hierarchy comes from spacing, contrast, and surface tint before strong borders
-- the primary indigo accent remains the default action color
-- backgrounds stay light and airy
-- typography remains clean and calm
-- interaction feedback stays subtle and polished
+- 视觉层级主要依赖留白、背景层次和字重，而不是粗边框
+- 主操作色保持靛蓝系
+- 背景保持明亮、干净、通透
+- 文字风格简洁克制
+- 动效和反馈轻量，不炫技
 
-Admin-specific interpretation rules:
+管理端的落地解释规则：
 
-- tables should be softened with card containers and gentle row states
-- forms should use generous spacing and simple field grouping
-- detail panels and drawers should feel like part of the same chat-product family
-- operational status colors should stay restrained and readable
+- 表格放在柔和卡片容器中
+- 行 hover、选中态要轻
+- 表单按逻辑分组，拉开呼吸感
+- 抽屉、详情面板、弹窗要延续同一产品家族气质
+- 成功、警告、错误等状态色只做清晰表达，不做强刺激
 
-## Error Handling
+## 错误处理
 
-The migration must not hide backend errors, but it may present them more clearly.
+本次迁移不应掩盖后端错误，但可以把错误展示做得更清楚。
 
-User app error handling should preserve:
+用户端需要保留：
 
-- stream failure handling
-- request timeout handling
-- empty collection or unavailable knowledge-base states
-- image upload validation or reset behavior already enforced on the frontend
+- 流式请求失败处理
+- 超时处理
+- 空知识库或不可用知识库提示
+- 当前前端已存在的图片重置或前端校验行为
 
-Admin app error handling should preserve:
+管理端需要保留：
 
-- authentication expiry handling
-- per-page load failure messaging
-- mutation failure messaging for collection, ticket, and document actions
-- non-blocking recovery where the legacy app already supports retry or refresh
+- 登录过期处理
+- 页面加载失败提示
+- 知识库、工单、文档相关变更失败提示
+- 当前旧前端已支持的刷新或重试能力
 
-Any frontend-only enhancement must stay presentation-level. It must not add new backend assumptions.
+任何增强都只能停留在前端展示层，不能偷偷引入新的后端前提。
 
-## Testing and Validation Strategy
+## 验证策略
 
-The migration should be validated at three levels.
+迁移完成后要从三个层面验证。
 
-### Contract parity
+### 契约对齐验证
 
-Verify that:
+需要验证：
 
-- all old user requests have matching requests in `frontend-user/`
-- all old admin requests have matching requests in `frontend-admin/`
-- auth and guest headers remain present where previously required
-- streaming parsing behavior remains functionally identical
+- 旧用户端每个关键请求，在 `frontend-user/` 中都有对应实现
+- 旧管理端每个关键请求，在 `frontend-admin/` 中都有对应实现
+- 鉴权头、游客头、门店入口头没有丢失
+- SSE 解析行为和旧前端功能等价
 
-### Feature parity
+### 功能对齐验证
 
-Verify user flows:
+用户端验证项：
 
-- knowledge-base question submission
-- streaming answer rendering
-- session switching
-- session deletion
-- history page navigation and resume
-- image-based question submission
-- store-entry identity behavior
+- 知识库提问
+- 流式回答展示
+- 会话切换
+- 会话删除
+- 历史页跳转与恢复
+- 图片提问
+- 门店/入口身份透传
 
-Verify admin flows:
+管理端验证项：
 
-- login, reload, and logout
-- collections listing and creation
-- retrieval/config editing
-- data import
-- data view
-- service ticket filtering, detail inspection, mutation, and re-vectorization
-- document and chunk child workflows
+- 登录、刷新后保持登录、登出
+- 知识库列表与创建
+- 检索配置/配置查看
+- 数据导入
+- 数据查看
+- 服务记录/工单筛选、详情、修改、重新向量化
+- 文档与 chunk 子流程
 
-### Build validation
+### 构建验证
 
-Both new frontends must:
+两个新前端都必须满足：
 
-- install cleanly
-- run in local dev mode against the current backend
-- build successfully for production
+- 可以独立安装依赖
+- 可以在本地开发模式下接现有后端运行
+- 可以独立完成生产构建
 
-The legacy `frontend/` should remain untouched enough to serve as a comparison reference until final acceptance.
+旧的 `frontend/` 在新前端验收前继续保留，作为对照和回退方案。
 
-## Scope Boundaries
+## 范围边界
 
-Included in scope:
+本次范围内：
 
-- creating `frontend-user/`
-- creating `frontend-admin/`
-- wiring both to the current backend
-- migrating all current user and admin frontend capabilities
-- adapting the provided template style for both apps
+- 新建 `frontend-user/`
+- 新建 `frontend-admin/`
+- 两个新前端接入当前后端
+- 迁移用户端全部现有能力
+- 迁移管理端全部现有能力
+- 将模板视觉语言扩展到用户端与管理端
 
-Explicitly out of scope:
+本次明确不在范围内：
 
-- changing backend Python code
-- changing backend endpoint shapes
-- changing backend business logic
-- introducing a shared frontend package just for cleanliness
-- deleting the legacy `frontend/` during the first migration pass
-- redesigning product requirements beyond the approved visual replacement and app split
+- 修改后端 Python 代码
+- 修改后端接口形态
+- 修改后端业务逻辑
+- 为了代码“好看”而额外引入共享前端包
+- 第一轮迁移时删除旧 `frontend/`
+- 借这次任务顺手改产品需求
 
-## Success Criteria
+## 成功标准
 
-The work is successful when:
+满足以下条件即视为成功：
 
-- the repository contains two runnable independent frontend apps: `frontend-user/` and `frontend-admin/`
-- the user app visually follows the provided template while preserving all current user-side functionality
-- the admin app visually follows the same template language while preserving all current admin-side functionality
-- both apps use the existing backend API without requiring backend code changes
-- the legacy mixed frontend remains available as a fallback until the new apps are accepted
+- 仓库中存在两个可独立运行的前端：`frontend-user/` 和 `frontend-admin/`
+- `frontend-user/` 在视觉上贴近提供的模板，同时完整保留当前用户端能力
+- `frontend-admin/` 在视觉上延续同一模板语言，同时完整保留当前管理端能力
+- 两个新前端都直接复用现有后端接口，不需要后端改代码
+- 旧 `frontend/` 在新前端确认通过前仍可作为回退方案存在
