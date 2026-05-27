@@ -34,11 +34,16 @@ def _chunk_to_source_block(chunk, index: int, graph_hint: Optional[str] = None) 
     # 提取字段（兼容 dict 和 object 两种格式）
     if isinstance(chunk, dict):
         content = chunk.get("content", "")
-        file_name = chunk.get("file_name") or chunk.get("metadata", {}).get("file_name", "")
+        metadata = chunk.get("metadata", {}) or {}
+        content = metadata.get("parent_content") or content
+        file_name = chunk.get("file_name") or metadata.get("file_name", "")
         title = chunk.get("title") or file_name or "未知来源"
         chunk_id = chunk.get("chunk_id") or chunk.get("id", "")
     else:
         content = getattr(chunk, "content", "")
+        metadata = getattr(chunk, "metadata", {}) or {}
+        if isinstance(metadata, dict):
+            content = metadata.get("parent_content") or content
         file_name = getattr(chunk, "file_name", "") or ""
         title = getattr(chunk, "title", None) or getattr(chunk, "source", None) or file_name or "未知来源"
         chunk_id = getattr(chunk, "chunk_id", "") or getattr(chunk, "id", "")
@@ -118,12 +123,16 @@ def build_sources_from_reranked(reranked_chunks: list) -> List[Dict[str, Any]]:
     sources = []
     for chunk in reranked_chunks:
         if isinstance(chunk, dict):
+            chunk_id = chunk.get("chunk_id") or chunk.get("id", "")
             file_name = chunk.get("file_name") or chunk.get("metadata", {}).get("file_name", "")
             title = chunk.get("title") or chunk.get("metadata", {}).get("title") or file_name or "未知来源"
             sources.append({
-                "id": chunk.get("id", ""),
+                "id": chunk_id,
+                "chunk_id": chunk_id,
+                "job_id": chunk.get("job_id") or chunk.get("metadata", {}).get("job_id"),
                 "title": title,
                 "file_name": file_name,
+                "chunk_index": chunk.get("chunk_index") if chunk.get("chunk_index") is not None else chunk.get("metadata", {}).get("chunk_index"),
                 "content": chunk.get("content", "")[:200],
                 "score": chunk.get("score", 0.0),
                 "metadata": chunk.get("metadata", {}),
@@ -131,15 +140,44 @@ def build_sources_from_reranked(reranked_chunks: list) -> List[Dict[str, Any]]:
         else:
             file_name = getattr(chunk, "file_name", "") or ""
             title = getattr(chunk, "title", None) or getattr(chunk, "source", None) or file_name or "未知来源"
+            chunk_id = getattr(chunk, "chunk_id", "")
             sources.append({
-                "id": getattr(chunk, "chunk_id", ""),
+                "id": chunk_id,
+                "chunk_id": chunk_id,
+                "job_id": getattr(chunk, "job_id", None),
                 "title": title,
                 "file_name": file_name,
+                "chunk_index": getattr(chunk, "chunk_index", None),
                 "content": (getattr(chunk, "content", "") or "")[:200],
                 "score": getattr(chunk, "score", 0.0),
                 "metadata": getattr(chunk, "metadata", {}) or {},
             })
     return sources
+
+
+def _parent_group_key(chunk) -> str:
+    if isinstance(chunk, dict):
+        metadata = chunk.get("metadata", {}) or {}
+        if isinstance(metadata, dict) and metadata.get("parent_id"):
+            return str(metadata["parent_id"])
+        return str(chunk.get("chunk_id") or chunk.get("id") or "")
+
+    metadata = getattr(chunk, "metadata", {}) or {}
+    if isinstance(metadata, dict) and metadata.get("parent_id"):
+        return str(metadata["parent_id"])
+    return str(getattr(chunk, "chunk_id", "") or getattr(chunk, "id", ""))
+
+
+def _dedupe_chunks_by_parent(chunks: list) -> list:
+    seen = set()
+    deduped = []
+    for chunk in chunks:
+        key = _parent_group_key(chunk)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(chunk)
+    return deduped
 
 
 def prepare_generation_context(state: KnowledgeAgentState, config=None) -> Dict[str, Any]:
@@ -204,22 +242,17 @@ def prepare_generation_context(state: KnowledgeAgentState, config=None) -> Dict[
 
     # ── 两节上下文：向量检索切片 vs 图谱关联切片 ──────────────────────────────
 
-    # 向量切片（merged_chunks）：做去重，保留所有 unique chunk_id
-    seen_ids: set = set()
-    unique_vector_chunks: list = []
-    for c in reranked_chunks:
-        cid = c.get("chunk_id") or c.get("id") or "" if isinstance(c, dict) else getattr(c, "chunk_id", None) or ""
-        if cid and cid not in seen_ids:
-            seen_ids.add(cid)
-            unique_vector_chunks.append(c)
+    # 向量切片（merged_chunks）：按 parent_id 去重，同一父块只注入一次上下文
+    unique_vector_chunks = _dedupe_chunks_by_parent(reranked_chunks)
+    seen_parent_keys = {_parent_group_key(c) for c in unique_vector_chunks}
 
     # 图谱切片（kg_graph_chunks）：去重补集（不在向量切片里的）
     kg_chunks_raw: list = state.get("kg_graph_chunks") or []
     graph_only_chunks: list = []
     for c in kg_chunks_raw:
-        cid = c.get("chunk_id") or "" if isinstance(c, dict) else getattr(c, "chunk_id", "")
-        if cid and cid not in seen_ids:
-            seen_ids.add(cid)
+        parent_key = _parent_group_key(c)
+        if parent_key and parent_key not in seen_parent_keys:
+            seen_parent_keys.add(parent_key)
             graph_only_chunks.append(c)
 
     # ── 渲染向量上下文 ─────────────────────────────────────────────────────

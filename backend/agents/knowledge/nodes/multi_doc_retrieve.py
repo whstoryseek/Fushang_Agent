@@ -10,6 +10,7 @@ from typing import List
 
 from ..state import KnowledgeAgentState, RetrievedChunk, RetrievalStrategy
 from ..services.retrieval import get_retrieval_service
+from app.services.retrieval_bucket import search_with_bucket_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -50,32 +51,40 @@ async def multi_doc_retrieve(state: KnowledgeAgentState) -> dict:
         print(f"\n[MultiDocRetrieve] query={query}, strategy={retrieval_strategy}")
 
         retrieval_service = get_retrieval_service()
-        kg_enabled = getattr(_cfg, "kg_enabled", False)
+        kg_already_routed = state.get("kg_deep_traversal") is not None
+        kg_enabled = getattr(_cfg, "kg_enabled", False) and not kg_already_routed
 
         # ── 并行执行 Milvus 检索 与 知识图谱检索 ────────────────────────────
-        def _milvus_search():
+        def _milvus_search(filter_expr=None):
             if retrieval_strategy == RetrievalStrategy.KEYWORD_ONLY:
                 return retrieval_service.keyword_search(
                     query=query, top_k=top_k, collection=collection,
+                    filter_expr=filter_expr,
                     keyword_filter=keyword_filter, ranker=ranker, rrf_k=rrf_k, hybrid_alpha=hybrid_alpha,
                 )
             return retrieval_service.hybrid_search(
                 query=query, top_k=top_k, collection=collection,
+                filter_expr=filter_expr,
                 group_by_field="file_name", group_size=group_size, strict_group_size=strict_group,
                 ranker=ranker, rrf_k=rrf_k, hybrid_alpha=hybrid_alpha,
             )
 
-        milvus_task = asyncio.to_thread(_milvus_search)
+        milvus_task = asyncio.to_thread(
+            search_with_bucket_fallback,
+            query=query,
+            top_k=top_k,
+            search_fn=_milvus_search,
+        )
 
         if kg_enabled:
             from .graph_retrieve import async_graph_retrieve
             graph_task = async_graph_retrieve(state)
-            chunks, graph_result = await asyncio.gather(milvus_task, graph_task)
+            (chunks, bucket_log), graph_result = await asyncio.gather(milvus_task, graph_task)
             graph_chunks = graph_result.get("kg_graph_chunks", [])
             graph_log = graph_result.get("processing_log", [])
             graph_warnings = graph_result.get("all_warnings", [])
         else:
-            chunks = await milvus_task
+            chunks, bucket_log = await milvus_task
             graph_chunks = []
             graph_log = []
             graph_warnings = []
@@ -95,7 +104,11 @@ async def multi_doc_retrieve(state: KnowledgeAgentState) -> dict:
             "metrics": metrics,
             "processing_log": [
                 {"stage": "multi_doc_retrieve", "duration_ms": duration,
-                 "chunks_count": len(chunks), "strategy": retrieval_strategy.value}
+                 "chunks_count": len(chunks), "strategy": retrieval_strategy.value,
+                 "preferred_bucket": bucket_log.get("preferred_bucket"),
+                 "bucket_fallback": bucket_log.get("bucket_fallback", False),
+                 "fallback_reason": bucket_log.get("fallback_reason"),
+                 "bucket_hits": bucket_log.get("bucket_hits", 0)}
             ] + graph_log,
         }
         if graph_chunks:

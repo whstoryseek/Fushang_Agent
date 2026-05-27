@@ -122,7 +122,19 @@ _TABLES = [
     )
     """,
 
-    # 8. 切片图片
+    # 8. 父块上下文（父子块模式下独立存储，避免每个 child 重复存一份）
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_chunk_parent (
+        parent_id    TEXT PRIMARY KEY,
+        job_id       UUID NOT NULL REFERENCES knowledge_job(id) ON DELETE CASCADE,
+        parent_index INTEGER NOT NULL DEFAULT 0,
+        content      TEXT NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chunk_parent_job ON knowledge_chunk_parent(job_id)",
+
+    # 9. 切片图片
     """
     CREATE TABLE IF NOT EXISTS knowledge_chunk_image (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -137,7 +149,7 @@ _TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_chunk_image_chunk ON knowledge_chunk_image(chunk_id)",
     "CREATE INDEX IF NOT EXISTS idx_chunk_image_placeholder ON knowledge_chunk_image(placeholder)",
 
-    # 9. 对话会话元数据
+    # 10. 对话会话元数据
     """
     CREATE TABLE IF NOT EXISTS conversation_session (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -150,7 +162,7 @@ _TABLES = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_conv_session_user_kb ON conversation_session(user_id, kb_name, updated_at DESC)",
 
-    # 10. 对话消息（业务展示层，独立于 LangGraph checkpoint）
+    # 11. 对话消息（业务展示层，独立于 LangGraph checkpoint）
     """
     CREATE TABLE IF NOT EXISTS conversation_message (
         id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -172,11 +184,11 @@ _TABLES = [
     "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS quality_level TEXT",
     "CREATE INDEX IF NOT EXISTS idx_conv_message_fallback ON conversation_message(used_fallback, created_at DESC)",
 
-    # 11. 未回答问题（独立表，与会话脱钩，长期保留）
+    # 12. 未回答问题（独立表，与会话脱钩，长期保留）
     """
     CREATE TABLE IF NOT EXISTS unanswered_question (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        session_id      UUID,
+        session_id      TEXT,
         query           TEXT NOT NULL,
         answer          TEXT,
         fallback_reason TEXT,
@@ -189,8 +201,14 @@ _TABLES = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_unanswered_created ON unanswered_question(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_unanswered_kb ON unanswered_question(kb_name, created_at DESC)",
+    # unanswered_question 补列：解决状态追踪
+    "ALTER TABLE unanswered_question ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'",
+    "ALTER TABLE unanswered_question ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ",
+    "ALTER TABLE unanswered_question ADD COLUMN IF NOT EXISTS resolved_kb_name TEXT",
+    "ALTER TABLE unanswered_question ADD COLUMN IF NOT EXISTS resolved_job_id UUID",
+    "CREATE INDEX IF NOT EXISTS idx_unanswered_status ON unanswered_question(status, created_at DESC)",
 
-    # 12. 服务记录 / 工单（每次店长提问均记录）
+    # 13. 服务记录 / 工单（每次店长提问均记录）
     """
     CREATE TABLE IF NOT EXISTS service_ticket (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -245,7 +263,7 @@ _TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_service_ticket_context_chunk ON service_ticket_context(chunk_id)",
     "CREATE INDEX IF NOT EXISTS idx_service_ticket_context_job ON service_ticket_context(job_id)",
 
-    # 13. 本地文件存储（替代 OSS）
+    # 14. 本地文件存储（替代 OSS）
     """
     CREATE TABLE IF NOT EXISTS file_storage (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -258,7 +276,7 @@ _TABLES = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_file_storage_key ON file_storage(file_key)",
 
-    # 14. 本地认证用户（当前仅管理员）
+    # 15. 本地认证用户（当前仅管理员）
     """
     CREATE TABLE IF NOT EXISTS auth_user (
         id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

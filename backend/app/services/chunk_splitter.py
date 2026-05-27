@@ -5,7 +5,7 @@
 """
 import io
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import uuid
 
 # 句子结束符（用于 overlap 从句子边界开始）
@@ -47,17 +47,103 @@ def split_text_with_metadata(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     base_metadata: dict = None,
+    chunk_strategy: str = "parent_child",
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    parent_id_prefix: Optional[str] = None,
 ) -> List[dict]:
     """返回带 metadata 的 chunk 列表，格式与图文模式一致"""
-    chunks = split_text(text, chunk_size, chunk_overlap)
+    strategy = chunk_strategy or "parent_child"
+    child_size = child_chunk_size or chunk_size
+
+    if strategy == "parent_child":
+        return split_parent_child_text(
+            text=text,
+            parent_chunk_size=parent_chunk_size or max(child_size * 3, 1200),
+            child_chunk_size=child_size,
+            chunk_overlap=chunk_overlap,
+            base_metadata=base_metadata,
+            parent_id_prefix=parent_id_prefix,
+        )
+    if strategy != "flat":
+        raise ValueError(f"不支持的切块策略: {strategy}")
+
+    _validate_chunk_config(child_size, child_size, chunk_overlap)
+    chunks = split_text(text, child_size, chunk_overlap)
     meta = base_metadata or {}
     return [
-        {"content": c, "metadata": {**meta, "chunk_index": i}}
+        {
+            "content": c,
+            "chunk_index": i,
+            "metadata": {**meta, "chunk_index": i, "chunk_strategy": "flat"},
+        }
         for i, c in enumerate(chunks)
     ]
 
 
 # ── 内部实现 ──────────────────────────────────────────────────────────────────
+
+def _validate_chunk_config(
+    parent_chunk_size: int,
+    child_chunk_size: int,
+    chunk_overlap: int,
+) -> None:
+    if parent_chunk_size <= 0:
+        raise ValueError("parent_chunk_size 必须大于 0")
+    if child_chunk_size <= 0:
+        raise ValueError("child_chunk_size 必须大于 0")
+    if parent_chunk_size < child_chunk_size:
+        raise ValueError("parent_chunk_size 必须大于或等于 child_chunk_size")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap 不能小于 0")
+    if chunk_overlap >= child_chunk_size:
+        raise ValueError("chunk_overlap 必须小于 child_chunk_size")
+
+
+def split_parent_child_text(
+    text: str,
+    parent_chunk_size: int = 1800,
+    child_chunk_size: int = 500,
+    chunk_overlap: int = 80,
+    base_metadata: dict = None,
+    parent_id_prefix: Optional[str] = None,
+) -> List[dict]:
+    """
+    将文本切成父子块。
+
+    最终返回子块；每个子块在 metadata 中携带父块上下文，便于检索命中后扩展回答上下文。
+    """
+    if not text or not text.strip():
+        return []
+
+    _validate_chunk_config(parent_chunk_size, child_chunk_size, chunk_overlap)
+
+    meta = base_metadata or {}
+    prefix = parent_id_prefix or "doc"
+    parent_chunks = split_text(text, parent_chunk_size, chunk_overlap)
+    child_chunks: List[dict] = []
+    global_child_index = 0
+
+    for parent_index, parent_content in enumerate(parent_chunks):
+        parent_id = f"{prefix}-parent-{parent_index}"
+        children = split_text(parent_content, child_chunk_size, chunk_overlap)
+        for child_index, child_content in enumerate(children):
+            child_chunks.append({
+                "content": child_content,
+                "chunk_index": global_child_index,
+                "metadata": {
+                    **meta,
+                    "chunk_index": global_child_index,
+                    "chunk_strategy": "parent_child",
+                    "parent_id": parent_id,
+                    "parent_index": parent_index,
+                    "child_index": child_index,
+                    "parent_content": parent_content,
+                },
+            })
+            global_child_index += 1
+
+    return child_chunks
 
 def _recursive_split(text: str, chunk_size: int) -> List[str]:
     """递归按分隔符切分，直到每段 <= chunk_size"""
@@ -337,6 +423,7 @@ def split_excel(
                         "file_name": file_name,
                         "sheet_name": sheet_name,
                         "source": "excel",
+                        "chunk_strategy": "excel_image_rows",
                         "row_start": data_row_idx,
                         "row_end": data_row_idx,
                     },
@@ -392,6 +479,7 @@ def split_excel(
                         "file_name": file_name,
                         "sheet_name": sheet_name,
                         "source": "excel",
+                        "chunk_strategy": "excel_rows",
                         "row_start": start,
                         "row_end": end - 1,
                     },

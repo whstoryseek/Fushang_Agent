@@ -29,29 +29,62 @@
             </el-select>
           </el-form-item>
 
+          <el-form-item label="切块策略">
+            <el-radio-group v-model="config.chunkProfile" size="small">
+              <el-radio-button label="smart_mix">鏅鸿兘娣峰悎</el-radio-button>
+              <el-radio-button label="parent_child">父子块</el-radio-button>
+              <el-radio-button label="flat">普通切块</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item label="切块预设">
+            <el-select
+              v-model="config.chunkPreset"
+              style="width: 180px"
+              @change="applySinglePreset"
+            >
+              <el-option
+                v-for="preset in chunkPresetOptions"
+                :key="preset.value"
+                :label="preset.label"
+                :value="preset.value"
+              />
+            </el-select>
+          </el-form-item>
+
           <el-form-item label="切片参数">
             <el-row :gutter="16" style="width: 100%">
-              <el-col :span="8">
+              <el-col v-if="config.chunkProfile !== 'flat'" :span="6">
                 <el-input-number
-                  v-model="config.chunkSize"
-                  :min="100"
-                  :max="2048"
+                  v-model="config.parentChunkSize"
+                  :min="config.childChunkSize"
+                  :max="5000"
                   :step="100"
                   style="width: 100%"
                 />
-                <div class="tip">块大小</div>
+                <div class="tip">父块大小</div>
               </el-col>
-              <el-col :span="8">
+              <el-col :span="6">
+                <el-input-number
+                  v-model="config.childChunkSize"
+                  :min="100"
+                  :max="2048"
+                  :step="50"
+                  style="width: 100%"
+                />
+                <div class="tip">子块大小</div>
+              </el-col>
+              <el-col :span="6">
                 <el-input-number
                   v-model="config.chunkOverlap"
                   :min="0"
-                  :max="config.chunkSize"
+                  :max="Math.max(config.childChunkSize - 1, 0)"
                   :step="10"
                   style="width: 100%"
                 />
                 <div class="tip">块重叠</div>
               </el-col>
-              <el-col v-if="imageMode" :span="8">
+              <el-col v-if="imageMode" :span="6">
                 <el-input-number
                   v-model="config.imageDpi"
                   :min="72"
@@ -156,12 +189,45 @@
 
           <el-divider content-position="left">切片参数</el-divider>
 
-          <el-form-item label="块大小">
+          <el-form-item label="切块策略">
+            <el-radio-group v-model="catConfig.chunkProfile" size="small">
+              <el-radio-button label="smart_mix">鏅鸿兘娣峰悎</el-radio-button>
+              <el-radio-button label="parent_child">父子块</el-radio-button>
+              <el-radio-button label="flat">普通切块</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item label="切块预设">
+            <el-select
+              v-model="catConfig.chunkPreset"
+              style="width: 180px"
+              @change="applyCategoryPreset"
+            >
+              <el-option
+                v-for="preset in chunkPresetOptions"
+                :key="preset.value"
+                :label="preset.label"
+                :value="preset.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item v-if="catConfig.chunkProfile !== 'flat'" label="父块大小">
             <el-input-number
-              v-model="catConfig.chunkSize"
+              v-model="catConfig.parentChunkSize"
+              :min="catConfig.childChunkSize"
+              :max="5000"
+              :step="100"
+              style="width: 180px"
+            />
+          </el-form-item>
+
+          <el-form-item label="子块大小">
+            <el-input-number
+              v-model="catConfig.childChunkSize"
               :min="100"
               :max="2048"
-              :step="100"
+              :step="50"
               style="width: 180px"
             />
           </el-form-item>
@@ -170,7 +236,7 @@
             <el-input-number
               v-model="catConfig.chunkOverlap"
               :min="0"
-              :max="catConfig.chunkSize"
+              :max="Math.max(catConfig.childChunkSize - 1, 0)"
               :step="10"
               style="width: 180px"
             />
@@ -286,18 +352,34 @@ const chunkResult = ref(null)
 const syncGraph = ref(false)
 const syncGraphCat = ref(false)
 
-const config = ref({
-  chunkSize: 800,
-  chunkOverlap: 100,
-  imageDpi: 150,
+const CHUNK_PRESETS = {
+  precise: { parentChunkSize: 1200, childChunkSize: 350, chunkOverlap: 60 },
+  balanced: { parentChunkSize: 1800, childChunkSize: 500, chunkOverlap: 80 },
+  broad: { parentChunkSize: 2400, childChunkSize: 700, chunkOverlap: 120 },
+}
+
+const chunkPresetOptions = [
+  { label: '精细', value: 'precise' },
+  { label: '均衡', value: 'balanced' },
+  { label: '大上下文', value: 'broad' },
+]
+
+const createChunkConfig = (extra = {}) => ({
+  chunkProfile: 'smart_mix',
+  chunkStrategy: 'parent_child',
+  chunkPreset: 'balanced',
+  ...CHUNK_PRESETS.balanced,
+  ...extra,
 })
 
-const catConfig = ref({
-  chunkSize: 800,
-  chunkOverlap: 100,
+const config = ref(createChunkConfig({
   imageDpi: 150,
-  excelRowsPerChunk: 50,
-})
+}))
+
+const catConfig = ref(createChunkConfig({
+  imageDpi: 150,
+  excelRowsPerChunk: 1,
+}))
 
 const singleUploadRef = ref(null)
 const singleSelectedFile = ref(null)
@@ -331,6 +413,43 @@ const collectionLabel = (collection) =>
 
 const collectionValue = (collection) =>
   collection.name || collection.collection_name || ''
+
+const applyPreset = (targetRef) => {
+  const preset = CHUNK_PRESETS[targetRef.value.chunkPreset] || CHUNK_PRESETS.balanced
+  targetRef.value.parentChunkSize = preset.parentChunkSize
+  targetRef.value.childChunkSize = preset.childChunkSize
+  targetRef.value.chunkOverlap = preset.chunkOverlap
+}
+
+const applySinglePreset = () => applyPreset(config)
+const applyCategoryPreset = () => applyPreset(catConfig)
+
+const normalizedChunkPayload = (chunkConfig) => {
+  const childSize = Number(chunkConfig.childChunkSize)
+  const resolvedStrategy = chunkConfig.chunkProfile === 'smart_mix'
+    ? 'parent_child'
+    : chunkConfig.chunkProfile
+  const parentSize = resolvedStrategy === 'parent_child'
+    ? Math.max(Number(chunkConfig.parentChunkSize), childSize)
+    : childSize
+  const overlap = Math.min(Number(chunkConfig.chunkOverlap), Math.max(childSize - 1, 0))
+
+  return {
+    chunk_profile: chunkConfig.chunkProfile,
+    chunk_strategy: resolvedStrategy,
+    parent_chunk_size: parentSize,
+    child_chunk_size: childSize,
+    chunk_size: childSize,
+    chunk_overlap: overlap,
+  }
+}
+
+const appendChunkPayload = (formData, chunkConfig) => {
+  const payload = normalizedChunkPayload(chunkConfig)
+  Object.entries(payload).forEach(([key, value]) => {
+    formData.append(key, String(value))
+  })
+}
 
 const validateFile = (file, allowedExtensions) => {
   if (!file) {
@@ -377,8 +496,7 @@ const submitSingleUpload = async () => {
     const formData = new FormData()
     formData.append('file', singleSelectedFile.value)
     formData.append('kb_name', resolvedCollection.value)
-    formData.append('chunk_size', String(config.value.chunkSize))
-    formData.append('chunk_overlap', String(config.value.chunkOverlap))
+    appendChunkPayload(formData, config.value)
     formData.append('image_dpi', String(config.value.imageDpi))
     formData.append('sync_graph', syncGraph.value ? 'true' : 'false')
 
@@ -440,8 +558,7 @@ const startChunking = async () => {
   try {
     const res = await docApi.startChunking(selectedCategoryId.value, {
       kb_name: resolvedCollection.value,
-      chunk_size: catConfig.value.chunkSize,
-      chunk_overlap: catConfig.value.chunkOverlap,
+      ...normalizedChunkPayload(catConfig.value),
       image_dpi: catConfig.value.imageDpi,
       sync_graph: syncGraphCat.value,
       excel_rows_per_chunk: catConfig.value.excelRowsPerChunk,

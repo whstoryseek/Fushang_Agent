@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { attachAuthHeaders, getAuthToken, getGuestId, handleAuthError } from './auth'
+import { buildEntryHeaders } from '../utils/entryIdentity.mjs'
 
 // Create axios instance
 const api = axios.create({
@@ -91,6 +92,7 @@ export const apiService = {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         'X-Guest-Id': getGuestId(),
+        ...buildEntryHeaders(),
         ...(getAuthToken() && { Authorization: `Bearer ${getAuthToken()}` }),
         // 避免中间层对响应做 gzip，导致整段缓冲后才解压、前端收不到增量
         'Accept-Encoding': 'identity',
@@ -163,15 +165,58 @@ export const apiService = {
     return this.knowledgeQuery(query, sessionId, model, collection, forceMultiDoc, keywordFilter, queryImage)
   },
 
-  // Admin: 未回答问题列表
-  async getUnansweredMessages(params = {}) {
-    const response = await api.get('/admin/unanswered/messages', { params })
+  // Admin: knowledge base collections
+  async listCollections() {
+    const response = await api.get('/admin/collections')
     return response.data
   },
 
-  // Admin: 对话统计
-  async getConversationStats(params = {}) {
-    const response = await api.get('/admin/unanswered/stats', { params })
+  // Admin: 服务记录 / 工单
+  async getServiceTickets(params = {}) {
+    const response = await api.get('/admin/service-tickets', { params })
+    return response.data
+  },
+
+  async getServiceTicketStats(params = {}) {
+    const response = await api.get('/admin/service-tickets/stats', { params })
+    return response.data
+  },
+
+  async getServiceTicket(id) {
+    const response = await api.get(`/admin/service-tickets/${encodeURIComponent(id)}`)
+    return response.data
+  },
+
+  async updateServiceTicket(id, payload) {
+    const response = await api.patch(`/admin/service-tickets/${encodeURIComponent(id)}`, payload)
+    return response.data
+  },
+
+  async deleteServiceTicket(id) {
+    const response = await api.delete(`/admin/service-tickets/${encodeURIComponent(id)}`)
+    return response.data
+  },
+
+  async updateServiceTicketChunk(id, chunkId, content) {
+    const response = await api.put(
+      `/admin/service-tickets/${encodeURIComponent(id)}/chunks/${encodeURIComponent(chunkId)}`,
+      { content },
+    )
+    return response.data
+  },
+
+  async revectorizeServiceTicket(id) {
+    const response = await api.post(`/admin/service-tickets/${encodeURIComponent(id)}/revectorize`)
+    return response.data
+  },
+
+  async resolveImages(placeholders = []) {
+    const response = await api.post('/chunks/resolve-images', { placeholders })
+    return response.data
+  },
+
+  async resolveQueryImages(ossKeys = []) {
+    const response = await api.post('/chunks/resolve-oss-keys', { oss_keys: ossKeys })
     return response.data
   },
 

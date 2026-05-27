@@ -23,6 +23,11 @@ async def upload_document(
     kb_name: str = Form(...),
     chunk_size: int = Form(500),
     chunk_overlap: int = Form(50),
+    parent_chunk_size: Optional[int] = Form(None),
+    child_chunk_size: Optional[int] = Form(None),
+    chunk_strategy: str = Form("parent_child"),
+    chunk_profile: str = Form("smart_mix"),
+    excel_rows_per_chunk: int = Form(1),
     image_dpi: int = Form(150),
     sync_graph: bool = Form(False, description="是否同步到知识图谱"),
 ):
@@ -34,6 +39,11 @@ async def upload_document(
         background_tasks=background_tasks,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
+        excel_rows_per_chunk=excel_rows_per_chunk,
         image_dpi=image_dpi,
         sync_graph=sync_graph,
     )
@@ -91,7 +101,7 @@ async def start_chunking_excel(
     category_id: str,
     background_tasks: BackgroundTasks,
     kb_name: str = Query(..., description="目标知识库名称"),
-    excel_rows_per_chunk: int = Query(50, description="每个切片的数据行数"),
+    excel_rows_per_chunk: int = Query(1, description="每个切片的数据行数"),
     excel_configs: str = Query(None, description="JSON 字符串，每个文件的列配置"),
 ):
     """Excel 专用切分接口，支持按文件、按 sheet 配置列选择和列别名"""
@@ -124,9 +134,13 @@ async def start_chunking(
     kb_name: str = Query(..., description="目标知识库名称"),
     chunk_size: int = Query(500),
     chunk_overlap: int = Query(50),
+    parent_chunk_size: Optional[int] = Query(None),
+    child_chunk_size: Optional[int] = Query(None),
+    chunk_strategy: str = Query("parent_child"),
+    chunk_profile: str = Query("smart_mix"),
     image_dpi: int = Query(150),
     sync_graph: bool = Query(False, description="是否同步到知识图谱"),
-    excel_rows_per_chunk: int = Query(50, description="Excel 每个切片的数据行数"),
+    excel_rows_per_chunk: int = Query(1, description="Excel 每个切片的数据行数"),
 ):
     """将类目下所有文件提交到知识库切分流水线"""
     result = await document_service.start_chunking(
@@ -135,6 +149,10 @@ async def start_chunking(
         background_tasks=background_tasks,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
         image_dpi=image_dpi,
         sync_graph=sync_graph,
         excel_rows_per_chunk=excel_rows_per_chunk,

@@ -48,6 +48,8 @@ class Settings:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     default_model: str = os.getenv("LLM_MODEL", "doubao-seed-2-0-pro-260215")
     llm_clean_model: str = os.getenv("LLM_CLEAN_MODEL", "doubao-seed-2-0-lite-260428")
+    operation_classifier_model: str = os.getenv("OPERATION_CLASSIFIER_MODEL", "doubao-seed-2-0-mini-260428")
+    operation_classifier_timeout: float = float(os.getenv("OPERATION_CLASSIFIER_TIMEOUT", "8"))
     temperature: float = 0.0
     max_tokens: int = 2000
     timeout: int = 60

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import './auth'
+import { buildListSessionsParams } from '../utils/conversationParams.mjs'
 
 const BASE = '/api/v1'
 
@@ -87,11 +88,8 @@ export const docApi = {
     axios.post(`${BASE}/chunks/resolve-oss-keys`, { oss_keys }),
 
   // ── 对话会话 ──────────────────────────────────────────────────────────────
-  listSessions: (kbName = null, userId = 'default') => {
-    const params = { user_id: userId }
-    if (kbName) params.kb_name = kbName
-    return axios.get(`${BASE}/conversations`, { params })
-  },
+  listSessions: (kbName = null) =>
+    axios.get(`${BASE}/conversations`, { params: buildListSessionsParams(kbName) }),
   createSession: (kbName, title = '新会话', userId = 'default') =>
     axios.post(`${BASE}/conversations`, { kb_name: kbName, title, user_id: userId }),
   getSessionMessages: (sessionId, limit = 100) =>

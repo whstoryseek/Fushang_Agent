@@ -15,6 +15,47 @@ from docx.oxml.ns import qn
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+if "fitz" not in sys.modules:
+    fitz_module = type(sys)("fitz")
+
+    class _Tools:
+        @staticmethod
+        def mupdf_display_errors(_value):
+            return None
+
+    def _not_available(*args, **kwargs):
+        raise NotImplementedError
+
+    fitz_module.TOOLS = _Tools()
+    fitz_module.open = _not_available
+    sys.modules["fitz"] = fitz_module
+
+if "psycopg2" not in sys.modules:
+    psycopg2_module = type(sys)("psycopg2")
+    psycopg2_pool_module = type(sys)("psycopg2.pool")
+    psycopg2_extras_module = type(sys)("psycopg2.extras")
+
+    def _connect(*args, **kwargs):
+        raise NotImplementedError
+
+    class _SimpleConnectionPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _ThreadedConnectionPool(_SimpleConnectionPool):
+        pass
+
+    psycopg2_module.connect = _connect
+    psycopg2_module.Error = Exception
+    psycopg2_pool_module.SimpleConnectionPool = _SimpleConnectionPool
+    psycopg2_pool_module.ThreadedConnectionPool = _ThreadedConnectionPool
+    psycopg2_extras_module.RealDictCursor = object
+    psycopg2_module.pool = psycopg2_pool_module
+    psycopg2_module.extras = psycopg2_extras_module
+    sys.modules["psycopg2"] = psycopg2_module
+    sys.modules["psycopg2.pool"] = psycopg2_pool_module
+    sys.modules["psycopg2.extras"] = psycopg2_extras_module
+
 os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
 os.environ.setdefault("OSS_BUCKET", "test-bucket")
 os.environ.setdefault("PG_HOST", "localhost")
@@ -26,6 +67,7 @@ os.environ.setdefault("OSS_ACCESS_KEY_SECRET", "secret")
 
 from app.core.exceptions import ValidationError
 from app.services import doc_image_parser, document_service, job_service
+from app.services.chunk_splitter import split_parent_child_text, split_text_with_metadata
 
 
 def _chunk(tag: bytes, payload: bytes) -> bytes:
@@ -93,7 +135,52 @@ def _build_docx_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _build_xlsx_bytes() -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "FAQ"
+    sheet.append(["问题", "答案"])
+    sheet.append(["店长端无法打开", "请检查网络和版本"])
+    sheet.append(["开店审核慢怎么办", "联系运营同学协助排查"])
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 class DocxPipelineTests(unittest.TestCase):
+    def test_parent_child_text_chunks_keep_parent_context(self):
+        text = "第一段说明开店流程。" * 80 + "\n\n" + "第二段说明人员入企。" * 80
+
+        chunks = split_parent_child_text(
+            text,
+            parent_chunk_size=300,
+            child_chunk_size=120,
+            chunk_overlap=20,
+            base_metadata={"file_name": "guide.txt", "source": "txt"},
+            parent_id_prefix="job-a",
+        )
+
+        self.assertGreater(len(chunks), 2)
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "parent_child")
+        self.assertEqual(chunks[0]["metadata"]["parent_id"], "job-a-parent-0")
+        self.assertIn("parent_content", chunks[0]["metadata"])
+        self.assertLessEqual(len(chunks[0]["content"]), 180)
+
+    def test_flat_text_strategy_remains_available(self):
+        chunks = split_text_with_metadata(
+            "A" * 260,
+            chunk_size=100,
+            chunk_overlap=0,
+            base_metadata={"source": "txt"},
+            chunk_strategy="flat",
+        )
+
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "flat")
+        self.assertNotIn("parent_content", chunks[0]["metadata"])
+
     def test_parse_text_mode_docx_preserves_markdown_tables_and_hyperlinks(self):
         chunks, _ = job_service._parse_text_mode(
             file_content=_build_docx_bytes(),
@@ -112,6 +199,23 @@ class DocxPipelineTests(unittest.TestCase):
         self.assertIn("| 开店申请 | 新加盟商首店 |", content)
         self.assertNotIn("<<IMAGE:", content)
 
+    def test_parse_text_mode_accepts_parent_child_config(self):
+        chunks, images = job_service._parse_text_mode(
+            file_content=("开店流程。" * 120).encode("utf-8"),
+            file_name="guide.txt",
+            job_id="job-parent-child",
+            chunk_size=500,
+            chunk_overlap=20,
+            parent_chunk_size=300,
+            child_chunk_size=120,
+            chunk_strategy="parent_child",
+        )
+
+        self.assertEqual(images, [])
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "parent_child")
+        self.assertIn("parent_content", chunks[0]["metadata"])
+
     def test_parse_word_docx_preserves_text_structure_and_inserts_placeholders(self):
         original_upload = doc_image_parser._upload_image
         doc_image_parser._upload_image = (
@@ -123,8 +227,11 @@ class DocxPipelineTests(unittest.TestCase):
                 job_id="job-1",
                 collection="kb-demo",
                 file_name="guide.docx",
-                chunk_size=2_000,
-                chunk_overlap=0,
+                chunk_size=500,
+                chunk_overlap=20,
+                parent_chunk_size=900,
+                child_chunk_size=260,
+                chunk_strategy="parent_child",
             )
         finally:
             doc_image_parser._upload_image = original_upload
@@ -133,9 +240,97 @@ class DocxPipelineTests(unittest.TestCase):
 
         self.assertIn("飞书资料 (https://example.com/doc)", content)
         self.assertIn("| 审批类别 | 适用场景 |", content)
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "parent_child")
+        self.assertIn("parent_content", chunks[0]["metadata"])
         self.assertEqual(len(image_records), 1)
         self.assertRegex(content, r"<<IMAGE:[0-9a-f]{8}>>")
-        self.assertIn(image_records[0]["placeholder"], content)
+        chunk_ids = {chunk["chunk_id"] for chunk in chunks}
+        self.assertIn(image_records[0]["chunk_id"], chunk_ids)
+        self.assertTrue(any(
+            image_records[0]["placeholder"] in chunk["content"]
+            or image_records[0]["placeholder"] in chunk["metadata"].get("parent_content", "")
+            for chunk in chunks
+        ))
+
+    def test_parse_text_mode_adds_retrieval_bucket_for_manual_docs(self):
+        chunks, _ = job_service._parse_text_mode(
+            file_content=("开店流程说明。" * 120).encode("utf-8"),
+            file_name="guide.txt",
+            job_id="job-manual-bucket",
+            chunk_size=500,
+            chunk_overlap=20,
+            parent_chunk_size=300,
+            child_chunk_size=120,
+            chunk_strategy="parent_child",
+            chunk_profile="smart_mix",
+        )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "parent_child")
+        self.assertEqual(chunks[0]["metadata"]["retrieval_bucket"], "manual")
+        self.assertEqual(chunks[0]["metadata"]["chunk_profile"], "smart_mix")
+        self.assertIn("parent_content", chunks[0]["metadata"])
+
+    def test_parse_text_mode_routes_faq_named_docs_to_flat_chunks(self):
+        chunks, _ = job_service._parse_text_mode(
+            file_content=("店长端无法打开，请检查网络后重试。" * 80).encode("utf-8"),
+            file_name="merchant_qa.txt",
+            job_id="job-faq-flat",
+            chunk_size=500,
+            chunk_overlap=20,
+            parent_chunk_size=300,
+            child_chunk_size=120,
+            chunk_strategy="parent_child",
+            chunk_profile="smart_mix",
+        )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chunks[0]["metadata"]["chunk_strategy"], "flat")
+        self.assertEqual(chunks[0]["metadata"]["retrieval_bucket"], "faq")
+        self.assertEqual(chunks[0]["metadata"]["chunk_profile"], "smart_mix")
+        self.assertNotIn("parent_content", chunks[0]["metadata"])
+
+    def test_parse_text_mode_excel_chunks_are_tagged_as_faq(self):
+        chunks, excel_images = job_service._parse_text_mode(
+            file_content=_build_xlsx_bytes(),
+            file_name="tickets_qa.xlsx",
+            job_id="job-excel-faq",
+            chunk_size=500,
+            chunk_overlap=20,
+            chunk_profile="smart_mix",
+            excel_rows_per_chunk=1,
+        )
+
+        self.assertEqual(excel_images, [])
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertEqual(chunks[0]["metadata"]["retrieval_bucket"], "faq")
+        self.assertEqual(chunks[0]["metadata"]["chunk_profile"], "smart_mix")
+        self.assertIn(chunks[0]["metadata"]["chunk_strategy"], {"excel_rows", "excel_image_rows"})
+
+    def test_parse_word_adds_retrieval_bucket_for_manual_docs(self):
+        original_upload = doc_image_parser._upload_image
+        doc_image_parser._upload_image = (
+            lambda image_bytes, ext, collection, file_name, chunk_id: f"oss://{chunk_id}.{ext}"
+        )
+        try:
+            chunks, _ = doc_image_parser.parse_word(
+                file_content=_build_docx_bytes(),
+                job_id="job-word-bucket",
+                collection="kb-demo",
+                file_name="guide.docx",
+                chunk_size=500,
+                chunk_overlap=20,
+                parent_chunk_size=900,
+                child_chunk_size=260,
+                chunk_strategy="parent_child",
+                chunk_profile="smart_mix",
+            )
+        finally:
+            doc_image_parser._upload_image = original_upload
+
+        self.assertGreaterEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["metadata"]["retrieval_bucket"], "manual")
+        self.assertEqual(chunks[0]["metadata"]["chunk_profile"], "smart_mix")
 
     def test_image_mode_pipeline_does_not_require_excel_image_data(self):
         class FakeJobRepo:

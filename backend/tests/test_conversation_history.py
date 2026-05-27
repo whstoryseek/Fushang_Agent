@@ -67,6 +67,23 @@ class ConversationHistoryTests(unittest.TestCase):
         self.assertEqual(session_id, "session-existing")
         mock_create_session.assert_not_called()
 
+    @patch("app.services.conversation_service.create_session")
+    def test_ensure_knowledge_session_creates_session_when_lookup_rejects_id(self, mock_create_session):
+        mock_create_session.return_value = {"id": "session-new"}
+        with patch("app.services.conversation_service.get_conversation_repository") as mock_get_repo:
+            repo = mock_get_repo.return_value
+            repo.get_session.side_effect = Exception("invalid uuid")
+
+            session_id = conversation_service.ensure_knowledge_session(
+                collection="kb-demo",
+                session_id="daily-session-title",
+                query="继续追问",
+                user_id="guest_local",
+            )
+
+        self.assertEqual(session_id, "session-new")
+        mock_create_session.assert_called_once()
+
     def test_ensure_knowledge_session_rejects_foreign_session(self):
         with patch("app.services.conversation_service.get_conversation_repository") as mock_get_repo:
             repo = mock_get_repo.return_value

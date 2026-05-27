@@ -399,10 +399,15 @@ class MilvusService:
                 chunk_ids = [h["chunk_id"] for h in hits if h.get("chunk_id")]
                 if chunk_ids:
                     pg_rows = chunk_repo.get_by_ids(chunk_ids)
-                    pg_map = {r["chunk_id"]: r["current_content"] for r in pg_rows}
+                    pg_map = {r["chunk_id"]: r for r in pg_rows}
                     for h in hits:
                         if h["chunk_id"] in pg_map:
-                            h["content"] = pg_map[h["chunk_id"]]
+                            pg_row = pg_map[h["chunk_id"]]
+                            h["content"] = pg_row.get("current_content", h["content"])
+                            h["metadata"] = {
+                                **(h.get("metadata") or {}),
+                                **(pg_row.get("metadata") or {}),
+                            }
                     logger.info(f"[Milvus] 回填 PG 原始内容: {len(pg_map)}/{len(chunk_ids)} 条")
             except Exception as e:
                 logger.warning(f"[Milvus] 回填 PG 内容失败（使用 Milvus clean 版本）: {e}")

@@ -44,12 +44,45 @@ class UnansweredRepository(BaseRepository):
         )
         return self._norm(rows[0]) if rows else {}
 
+    def get_by_id(self, unanswered_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._execute_select(
+            "SELECT * FROM unanswered_question WHERE id = %s LIMIT 1", (unanswered_id,)
+        )
+        return self._norm(rows[0]) if rows else None
+
+    def update_status(
+        self,
+        unanswered_id: str,
+        *,
+        status: str,
+        resolved_at: Optional[str] = None,
+        resolved_kb_name: Optional[str] = None,
+        resolved_job_id: Optional[str] = None,
+    ) -> None:
+        parts = ["status = %s"]
+        params: List[Any] = [status]
+        if resolved_at is not None:
+            parts.append("resolved_at = %s")
+            params.append(resolved_at)
+        if resolved_kb_name is not None:
+            parts.append("resolved_kb_name = %s")
+            params.append(resolved_kb_name)
+        if resolved_job_id is not None:
+            parts.append("resolved_job_id = %s")
+            params.append(resolved_job_id)
+        params.append(unanswered_id)
+        self._execute_sql(
+            f"UPDATE unanswered_question SET {', '.join(parts)} WHERE id = %s",
+            tuple(params),
+        )
+
     def list(
         self,
         *,
         kb_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        status: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -59,6 +92,9 @@ class UnansweredRepository(BaseRepository):
         if kb_name:
             conditions.append("kb_name = %s")
             params.append(kb_name)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
         if start_date:
             conditions.append("created_at >= %s")
             params.append(f"{start_date} 00:00:00")
@@ -82,6 +118,7 @@ class UnansweredRepository(BaseRepository):
         kb_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> int:
         conditions = ["1=1"]
         params: list = []
@@ -89,6 +126,9 @@ class UnansweredRepository(BaseRepository):
         if kb_name:
             conditions.append("kb_name = %s")
             params.append(kb_name)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
         if start_date:
             conditions.append("created_at >= %s")
             params.append(f"{start_date} 00:00:00")
@@ -109,6 +149,7 @@ class UnansweredRepository(BaseRepository):
         kb_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> Dict[str, Any]:
         conditions = ["1=1"]
         params: list = []
@@ -116,6 +157,9 @@ class UnansweredRepository(BaseRepository):
         if kb_name:
             conditions.append("kb_name = %s")
             params.append(kb_name)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
         if start_date:
             conditions.append("created_at >= %s")
             params.append(f"{start_date} 00:00:00")

@@ -2,6 +2,8 @@
 """
 Knowledge RAG 业务逻辑（Knowledge Agent 调用封装）
 """
+import asyncio
+import contextlib
 import json
 import re
 import uuid
@@ -11,9 +13,13 @@ from typing import Optional, AsyncIterator, Dict, Any
 from app.core.config import settings, SUPPORTED_MODELS
 from app.core.exceptions import ValidationError, ExternalServiceError
 from app.services.service_ticket_service import (
+    INTENT_AMBIGUOUS,
     INTENT_MISSING_KNOWLEDGE,
+    INTENT_OPERATION,
+    analyze_operation_workflow_with_llm,
     classify_ticket_intent_with_llm,
     process_ticket_clarification_turn,
+    record_ai_resolved_ticket,
     should_start_missing_knowledge_flow,
 )
 
@@ -118,6 +124,93 @@ def persist_knowledge_result(
         quality_passed=result.get("quality_passed"),
         quality_level=result.get("quality_level"),
         kb_name=kb_name,
+    )
+
+
+def _should_record_ai_resolved_ticket(result: Dict[str, Any]) -> bool:
+    if not (result.get("answer") or "").strip():
+        return False
+    if result.get("used_fallback"):
+        return False
+    if result.get("quality_passed") is False:
+        return False
+    return True
+
+
+def _is_pre_rag_ticket_decision(decision: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(decision, dict) or not decision.get("needs_ticket_flow"):
+        return False
+    return str(decision.get("intent_class") or "").upper() in {INTENT_OPERATION, INTENT_AMBIGUOUS}
+
+
+def _consume_task_exception(task: asyncio.Task) -> None:
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.exception()
+
+
+def persist_clarification_message(
+    *,
+    session_id: str,
+    query: str,
+    answer: str,
+    kb_name: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    decision: Optional[Dict[str, Any]] = None,
+    workflow: Optional[Dict[str, Any]] = None,
+    rag_result: Optional[Dict[str, Any]] = None,
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    from app.db import get_conversation_repository
+    from app.services import service_ticket_service
+
+    conv_repo = get_conversation_repository()
+    if conv_repo.get_session(session_id):
+        conv_repo.add_message(
+            session_id=session_id,
+            role="user",
+            content=query,
+            query_image_oss_key=query_image_oss_key,
+        )
+        conv_repo.add_message(
+            session_id=session_id,
+            role="assistant",
+            content=answer or "",
+            sources=[],
+            confidence=0.0,
+            used_fallback=False,
+            quality_passed=None,
+            quality_level="clarification",
+        )
+        conv_repo.touch_session(session_id)
+
+    ticket_decision = decision or {
+        "intent_class": "C",
+        "reason": "clarification_required",
+        "needs_ticket_flow": True,
+        "fields": {},
+        "missing_fields": ["issue_detail"],
+        "question": answer or "",
+        "source": "system",
+    }
+    return service_ticket_service.process_clarification_turn(
+        session_id=session_id,
+        user_id=user_id or "guest_default",
+        user_name=user_name,
+        sender_id=sender_id,
+        requester_name=requester_name or user_name,
+        kb_name=kb_name,
+        query=query,
+        channel=channel or "web",
+        decision=ticket_decision,
+        workflow=workflow,
+        rag_result=rag_result,
+        has_image=has_image,
+        query_image_oss_key=query_image_oss_key,
     )
 
 
@@ -329,6 +422,7 @@ async def stream_knowledge_qa_sse(
     channel: str = "web",
     sender_id: Optional[str] = None,
     requester_name: Optional[str] = None,
+    pre_rag_ticket_decision_task: Optional[asyncio.Task] = None,
 ) -> AsyncIterator[str]:
     """
     Knowledge 问答 SSE：检索阶段走 LangGraph（interrupt 在 generate 前），
@@ -392,6 +486,75 @@ async def stream_knowledge_qa_sse(
 
     ctx = prepare_generation_context(vals, config)
     sources_preview = build_sources_from_reranked(ctx["reranked_chunks"])
+    pre_rag_decision = None
+    if pre_rag_ticket_decision_task is not None and pre_rag_ticket_decision_task.done():
+        with contextlib.suppress(Exception):
+            pre_rag_decision = pre_rag_ticket_decision_task.result()
+    elif pre_rag_ticket_decision_task is not None:
+        pre_rag_ticket_decision_task.add_done_callback(_consume_task_exception)
+
+    if _is_pre_rag_ticket_decision(pre_rag_decision):
+        rag_result_for_ticket = {
+            "request_id": request_id,
+            "session_id": session_id,
+            "answer": "",
+            "confidence": None,
+            "sources": sources_preview,
+            "model": model_name,
+            "thoughts": _thoughts_from_state_values(vals),
+            "image_map": ctx["image_map"] or {},
+            "finish_reason": "clarification",
+            "used_fallback": False,
+            "fallback_reason": None,
+            "quality_passed": None,
+            "quality_level": None,
+            "kb_name": kb.get("name") if kb else collection,
+        }
+        workflow = None
+        try:
+            if str(pre_rag_decision.get("intent_class") or "").upper() == INTENT_OPERATION:
+                workflow = analyze_operation_workflow_with_llm(
+                    query=query,
+                    decision=pre_rag_decision,
+                    rag_result=rag_result_for_ticket,
+                )
+            ticket_result = process_ticket_clarification_turn(
+                session_id=session_id,
+                user_id=user_id or "guest_default",
+                user_name=user_name,
+                sender_id=sender_id,
+                requester_name=requester_name,
+                kb_name=collection,
+                query=query,
+                channel=channel or "web",
+                decision=pre_rag_decision,
+                workflow=workflow,
+                rag_result=rag_result_for_ticket,
+                has_image=bool(query_image_url or query_image_oss_key),
+                query_image_oss_key=query_image_oss_key,
+            )
+            if ticket_result:
+                yield _sse(
+                    "done",
+                    {
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "answer": ticket_result["answer"],
+                        "confidence": float(ticket_result.get("confidence") or 0.0),
+                        "sources": [],
+                        "model": model_name,
+                        "thoughts": {
+                            "clarification_required": True,
+                            "clarification": ticket_result.get("clarification"),
+                            "ticket_intent": pre_rag_decision,
+                        },
+                        "image_map": ctx["image_map"] or {},
+                        "finish_reason": ticket_result.get("finish_reason") or "clarification",
+                    },
+                )
+                return
+        except Exception as exc:
+            logger.warning("stream pre-rag ticket conversion failed: %s", exc)
 
     yield _sse(
         "meta",
@@ -519,3 +682,23 @@ async def stream_knowledge_qa_sse(
             quality_level=quality_level,
             kb_name=kb.get("name") if kb else None,
         )
+        if _should_record_ai_resolved_ticket(rag_result):
+            try:
+                record_ai_resolved_ticket(
+                    session_id=session_id,
+                    user_id=user_id or "guest_default",
+                    user_name=user_name,
+                    kb_name=collection,
+                    query=query,
+                    answer=answer_final,
+                    status="resolved_ai",
+                    confidence=final.get("confidence"),
+                    rag_result=rag_result,
+                    channel=channel or "web",
+                    sender_id=sender_id,
+                    requester_name=requester_name,
+                    has_image=bool(query_image_url or query_image_oss_key),
+                    query_image_oss_key=query_image_oss_key,
+                )
+            except Exception as exc:
+                logger.warning("stream resolved-ai ticket record failed: %s", exc)

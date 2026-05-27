@@ -44,6 +44,8 @@ from .nodes import (
     query_rewrite,
     query_classify,
     determine_retrieval_strategy,
+    kg_query_route,
+    graph_retrieve,
     single_doc_retrieve,
     multi_doc_retrieve,
     filter_chunks,
@@ -61,11 +63,14 @@ def route_by_query_type(state: KnowledgeAgentState) -> Literal["single_doc_retri
 
 def route_after_retrieval_strategy(
     state: KnowledgeAgentState,
-) -> Literal["single_doc_retrieve", "multi_doc_retrieve"]:
+) -> Literal["kg_query_route", "single_doc_retrieve", "multi_doc_retrieve"]:
     """根据 KB 的知识图谱开关和 query_type 路由到检索节点。
     注：原 kg_query_route 节点已被移除（其输出的 kg_deep_traversal 未被任何下游节点使用，
     仅增加 ~5s LLM 延迟）。图谱检索已内联到 single/multi_doc_retrieve 中并行执行，
     因此 kg_enabled=True 时直接路由到对应 retrieve 节点，无需经过独立的 graph_retrieve。"""
+    config = state.get("config")
+    if config and getattr(config, "kg_enabled", False):
+        return "kg_query_route"
     return route_by_query_type(state)
 
 
@@ -102,6 +107,8 @@ def create_knowledge_agent(checkpointer=None, interrupt_before: Optional[List[st
     builder.add_node("query_rewrite", query_rewrite)
     builder.add_node("query_classify", query_classify)
     builder.add_node("determine_retrieval_strategy", determine_retrieval_strategy)
+    builder.add_node("kg_query_route", kg_query_route)
+    builder.add_node("graph_retrieve", graph_retrieve)
     builder.add_node("single_doc_retrieve", single_doc_retrieve)
     builder.add_node("multi_doc_retrieve", multi_doc_retrieve)
     builder.add_node("filter_chunks", filter_chunks)
@@ -117,6 +124,16 @@ def create_knowledge_agent(checkpointer=None, interrupt_before: Optional[List[st
     builder.add_conditional_edges(
         "determine_retrieval_strategy",
         route_after_retrieval_strategy,
+        {
+            "kg_query_route": "kg_query_route",
+            "single_doc_retrieve": "single_doc_retrieve",
+            "multi_doc_retrieve": "multi_doc_retrieve",
+        },
+    )
+    builder.add_edge("kg_query_route", "graph_retrieve")
+    builder.add_conditional_edges(
+        "graph_retrieve",
+        route_by_query_type,
         {
             "single_doc_retrieve": "single_doc_retrieve",
             "multi_doc_retrieve": "multi_doc_retrieve",

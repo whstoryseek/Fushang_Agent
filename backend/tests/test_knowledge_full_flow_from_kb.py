@@ -145,6 +145,7 @@ class KnowledgeFullFlowFromKbTests(unittest.IsolatedAsyncioTestCase):
         lookup.assert_called_once()
         self.assertEqual(lookup.call_args.kwargs["rag_result"]["sources"][0]["file_name"], "开通微信子商户号.docx")
         ticket.assert_called_once()
+        self.assertEqual(ticket.call_args.kwargs["rag_result"]["sources"][0]["file_name"], "开通微信子商户号.docx")
         self.assertTrue(ticket.call_args.kwargs["workflow"]["workflow_found"])
         self.assertEqual(ticket.call_args.kwargs["workflow"]["workflow_sources"][0]["file_name"], "开通微信子商户号.docx")
 

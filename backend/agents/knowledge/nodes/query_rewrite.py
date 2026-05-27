@@ -18,7 +18,7 @@ from ..state import KnowledgeAgentState
 logger = logging.getLogger(__name__)
 
 REWRITE_MAX_TOKENS = 64
-REWRITE_TIMEOUT_SECONDS = 8.0
+REWRITE_TIMEOUT_SECONDS = 5.0
 REWRITE_MAX_RETRIES = 0
 CONTEXT_DEPENDENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"这个|那个|上述|上面|前面|刚才|之前|这里|那里"),

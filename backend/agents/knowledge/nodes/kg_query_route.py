@@ -36,7 +36,7 @@ def kg_query_route(state: KnowledgeAgentState) -> dict:
     try:
         messages = [
             {"role": "system", "content": KNOWLEDGE_KG_DEEP_ROUTE_SYSTEM},
-            {"role": "user", "content": f"用户问题：{query}\n\n只输出 yes 或 no："},
+            {"role": "user", "content": f"用户问题：{query}\n\n只输出 是 或 否："},
         ]
         try:
             text = get_llm_service().chat(

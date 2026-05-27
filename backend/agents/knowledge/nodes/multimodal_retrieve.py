@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from ..state import KnowledgeAgentState, RetrievalStrategy
 from app.services.milvus_service import get_milvus_service
+from app.services.retrieval_bucket import search_with_bucket_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -93,32 +94,31 @@ async def multimodal_retrieve(
 
         milvus_svc = get_milvus_service()
 
-        if retrieval_strategy == RetrievalStrategy.KEYWORD_ONLY:
-            chunks = milvus_svc.hybrid_search(
-                collection_name=collection,
-                query=query,
-                top_k=top_k,
-                keyword_filter=keyword_filter or query,
-                ranker=ranker,
-                rrf_k=rrf_k,
-                hybrid_alpha=hybrid_alpha,
-                query_image_vector=query_image_vector,
-                query_text_vector=query_text_vector,
-            )
-        else:
-            chunks = milvus_svc.hybrid_search(
-                collection_name=collection,
-                query=query,
-                top_k=top_k,
-                ranker=ranker,
-                rrf_k=rrf_k,
-                hybrid_alpha=hybrid_alpha,
-                group_by_field=group_by_field,
-                group_size=group_size,
-                strict_group_size=strict_group_size,
-                query_image_vector=query_image_vector,
-                query_text_vector=query_text_vector,
-            )
+        def _search(filter_expr):
+            kwargs = {
+                "collection_name": collection,
+                "query": query,
+                "top_k": top_k,
+                "filter_expr": filter_expr,
+                "ranker": ranker,
+                "rrf_k": rrf_k,
+                "hybrid_alpha": hybrid_alpha,
+                "query_image_vector": query_image_vector,
+                "query_text_vector": query_text_vector,
+            }
+            if retrieval_strategy == RetrievalStrategy.KEYWORD_ONLY:
+                kwargs["keyword_filter"] = keyword_filter or query
+            else:
+                kwargs["group_by_field"] = group_by_field
+                kwargs["group_size"] = group_size
+                kwargs["strict_group_size"] = strict_group_size
+            return milvus_svc.hybrid_search(**kwargs)
+
+        chunks, bucket_log = search_with_bucket_fallback(
+            query=query,
+            top_k=top_k,
+            search_fn=_search,
+        )
 
         duration = (datetime.now() - start_time).total_seconds() * 1000
         logger.info(f"[MultimodalRetrieve] 完成 ({duration:.0f}ms): {len(chunks)} 条")
@@ -137,6 +137,10 @@ async def multimodal_retrieve(
                 "duration_ms": duration,
                 "chunks_count": len(chunks),
                 "has_image_query": bool(query_image_url),
+                "preferred_bucket": bucket_log.get("preferred_bucket"),
+                "bucket_fallback": bucket_log.get("bucket_fallback", False),
+                "fallback_reason": bucket_log.get("fallback_reason"),
+                "bucket_hits": bucket_log.get("bucket_hits", 0),
             }],
         }
 

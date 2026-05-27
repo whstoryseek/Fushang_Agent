@@ -251,6 +251,27 @@ body {
 .el-dialog__footer { border-top: 1px solid rgba(255,255,255,0.07) !important; padding: 16px 24px !important; }
 .el-overlay { background: rgba(0,0,0,0.75) !important; backdrop-filter: blur(6px); }
 
+/* Drawer */
+.el-drawer {
+  --el-drawer-bg-color: #0c1220;
+  background: #0c1220 !important;
+  border-left: 1px solid rgba(255,255,255,0.08) !important;
+  color: var(--text-primary) !important;
+  box-shadow: 0 32px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.04) inset !important;
+}
+.el-drawer__body {
+  color: var(--text-primary) !important;
+}
+.el-drawer__header {
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid rgba(255,255,255,0.07) !important;
+  margin-bottom: 0 !important;
+}
+.el-drawer__title,
+.el-drawer__close-btn {
+  color: var(--text-primary) !important;
+}
+
 /* ── Tabs ── */
 .el-tabs--border-card {
   background: rgba(255,255,255,0.02) !important;

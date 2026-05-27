@@ -162,6 +162,28 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
         self.assertEqual(stats["by_status"]["pending_manual"], 1)
         self.assertEqual(stats["daily"][0]["pending_manual"], 1)
 
+    def test_delete_removes_ticket_by_id_and_reports_success(self):
+        repo = ServiceTicketRepository()
+
+        with patch.object(
+            repo,
+            "_execute_returning",
+            return_value=[{"id": "ticket-1"}],
+        ) as returning:
+            deleted = repo.delete("ticket-1")
+
+        self.assertTrue(deleted)
+        self.assertIn("DELETE FROM service_ticket", returning.call_args.args[0])
+        self.assertEqual(returning.call_args.args[1], ("ticket-1",))
+
+    def test_delete_returns_false_when_ticket_missing(self):
+        repo = ServiceTicketRepository()
+
+        with patch.object(repo, "_execute_returning", return_value=[]):
+            deleted = repo.delete("missing-ticket")
+
+        self.assertFalse(deleted)
+
 
 if __name__ == "__main__":
     unittest.main()

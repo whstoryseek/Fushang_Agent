@@ -1,5 +1,5 @@
 <template>
-  <div id="app">
+  <div id="app" :class="{ 'store-entry': entryIdentity.isStoreEntry }">
     <!-- Aurora background blobs -->
     <div class="aurora-bg" aria-hidden="true">
       <div class="blob blob-1" />
@@ -10,7 +10,7 @@
 
     <div class="app-layout">
       <!-- Icon sidebar -->
-      <aside class="sidebar">
+      <aside v-if="!entryIdentity.isStoreEntry" class="sidebar">
         <div class="sidebar-logo">
           <div class="logo-mark" style="font-size:12px; font-weight:700;">
             天合
@@ -36,11 +36,11 @@
             :content="item.label" placement="right" effect="dark">
             <button
               class="nav-item"
-              :class="{ active: activeMenu === item.key || (item.match && activeMenu.startsWith(item.match)) }"
+              :class="{ active: isAdminNavItemSelected(item) }"
               @click="handleMenuSelect(item.key)"
             >
               <el-icon><component :is="item.icon" /></el-icon>
-              <span v-if="activeMenu === item.key || (item.match && activeMenu.startsWith(item.match))" class="nav-active-dot" />
+              <span v-if="isAdminNavItemSelected(item)" class="nav-active-dot" />
             </button>
           </el-tooltip>
         </nav>
@@ -55,20 +55,23 @@
             <span v-if="pageSubtitle" class="page-subtitle">{{ pageSubtitle }}</span>
           </div>
           <div class="topbar-right">
-            <div class="model-select-wrap">
+            <div v-if="!entryIdentity.isStoreEntry" class="model-select-wrap">
               <el-icon class="model-icon"><cpu /></el-icon>
               <el-select v-model="selectedModel" size="small" style="width:160px" placeholder="模型">
                 <el-option v-for="m in availableModels" :key="m.name" :label="m.name" :value="m.name" />
               </el-select>
             </div>
-            <el-button v-if="!isAdmin" size="small" plain @click="loginDialogVisible = true">
+            <el-button v-if="!isAdmin && !entryIdentity.isStoreEntry" size="small" plain @click="loginDialogVisible = true">
               管理员登录
             </el-button>
-            <div v-else class="admin-session">
+            <div v-else-if="isAdmin && !entryIdentity.isStoreEntry" class="admin-session">
               <el-tag size="small" type="success">{{ currentAdmin?.username || 'admin' }}</el-tag>
               <el-button size="small" plain @click="logoutAdmin">退出</el-button>
             </div>
-            <div class="status-pill" :class="apiStatus ? 'online' : 'offline'">
+            <div v-if="entryIdentity.isStoreEntry" class="entry-pill">
+              {{ entryIdentity.nickname || entryIdentity.userId }}
+            </div>
+            <div v-else class="status-pill" :class="apiStatus ? 'online' : 'offline'">
               <span class="pulse-dot" />
               {{ apiStatus ? 'Connected' : 'Offline' }}
             </div>
@@ -77,13 +80,13 @@
 
         <!-- Content -->
         <main class="content">
-          <div v-show="activeMenu === 'chat'"><SimpleChat :model="selectedModel" :is-admin="isAdmin" /></div>
-          <div v-show="activeMenu === 'user-history'"><UserHistory /></div>
-          <template v-if="isAdmin">
-            <div v-show="activeMenu === 'admin-data-import'"><AdminDataImport :collection="selectedCollection" /></div>
-            <div v-show="activeMenu === 'admin-data-view'"><AdminDataView /></div>
-            <div v-show="activeMenu === 'admin-unanswered'"><AdminUnanswered /></div>
-            <div v-show="activeMenu.startsWith('admin')"><AdminPanel :active-tab="adminTab" /></div>
+          <div v-show="activeMenu === 'chat'"><SimpleChat :model="selectedModel" :is-admin="isAdmin && !entryIdentity.isStoreEntry" :entry-identity="entryIdentity" /></div>
+          <div v-if="!entryIdentity.isStoreEntry" v-show="activeMenu === 'user-history'"><UserHistory /></div>
+          <template v-if="isAdmin && !entryIdentity.isStoreEntry">
+            <div v-if="activeMenu === 'admin-data-import'"><AdminDataImport :collection="selectedCollection" /></div>
+            <div v-else-if="activeMenu === 'admin-data-view'"><AdminDataView /></div>
+            <div v-else-if="activeMenu === 'admin-service-tickets'"><AdminServiceTickets /></div>
+            <div v-else-if="isAdminPanelMenu(activeMenu)"><AdminPanel :active-tab="adminTab" /></div>
           </template>
         </main>
       </div>
@@ -116,7 +119,9 @@ import AdminPanel from './components/AdminPanel.vue'
 import UserHistory from './components/UserHistory.vue'
 import AdminDataImport from './components/admin/AdminDataImport.vue'
 import AdminDataView from './components/admin/AdminDataView.vue'
-import AdminUnanswered from './components/admin/AdminUnanswered.vue'
+import AdminServiceTickets from './components/admin/AdminServiceTickets.vue'
+import { isAdminNavItemActive, isAdminPanelMenu } from './utils/adminNavigation.mjs'
+import { getEntryIdentity } from './utils/entryIdentity.mjs'
 
 const activeMenu = ref('chat')
 const selectedModel = ref('qwen-turbo')
@@ -128,6 +133,7 @@ const isAdmin = computed(() => currentAdmin.value?.role === 'admin')
 const loginDialogVisible = ref(false)
 const loginLoading = ref(false)
 const loginForm = ref({ username: 'admin', password: '' })
+const entryIdentity = getEntryIdentity()
 
 const qaNavItems = [
   { key: 'chat', label: '智能问答', icon: 'ChatDotRound' },
@@ -135,10 +141,10 @@ const qaNavItems = [
 ]
 
 const adminNavItems = [
+  { key: 'admin-service-tickets', label: '服务记录/工单', icon: 'Tickets' },
   { key: 'admin-data-import', label: '数据导入', icon: 'UploadFilled' },
   { key: 'admin-data-view', label: '数据查看', icon: 'View' },
-  { key: 'admin-unanswered', label: '未回答问题', icon: 'WarningFilled' },
-  { key: 'admin-collections', label: '系统设置', icon: 'Setting', match: 'admin' },
+  { key: 'admin-collections', label: '系统设置', icon: 'Setting', panelKeys: ['admin-collections', 'admin-create', 'admin-config'] },
 ]
 const visibleAdminNavItems = computed(() => isAdmin.value ? adminNavItems : [])
 
@@ -148,23 +154,34 @@ const adminTab = computed(() => adminTabMap[activeMenu.value] || 'collections')
 const pageMeta = {
   chat:               { title: '智能问答', sub: '天合人康扶商问答系统' },
   'user-history':     { title: '对话历史', sub: '查看您的问答记录' },
+  'admin-service-tickets': { title: '服务记录/工单', sub: '查看问答记录、人工处理和召回上下文回修' },
   'admin-data-import':{ title: '数据导入', sub: '导入文档到知识库' },
   'admin-data-view':  { title: '数据查看', sub: '查看知识库数据' },
-  'admin-unanswered': { title: '未回答问题', sub: 'AI 未能回答的问题监控' },
   'admin-collections':{ title: '系统设置', sub: '知识库配置与管理' },
   'admin-create':     { title: '创建知识库', sub: '新建向量集合' },
   'admin-config':     { title: '配置信息', sub: '系统参数' },
 }
-const pageTitle    = computed(() => pageMeta[activeMenu.value]?.title || '')
-const pageSubtitle = computed(() => pageMeta[activeMenu.value]?.sub || '')
+const pageTitle = computed(() =>
+  entryIdentity.isStoreEntry ? '扶商店长助手' : (pageMeta[activeMenu.value]?.title || '')
+)
+const pageSubtitle = computed(() =>
+  entryIdentity.isStoreEntry
+    ? (entryIdentity.kb ? `知识库：${entryIdentity.kb}` : '每日会话')
+    : (pageMeta[activeMenu.value]?.sub || '')
+)
 
 const handleMenuSelect = (key) => {
+  if (entryIdentity.isStoreEntry) {
+    activeMenu.value = 'chat'
+    return
+  }
   if (key.startsWith('admin') && !isAdmin.value) {
     loginDialogVisible.value = true
     return
   }
   activeMenu.value = key
 }
+const isAdminNavItemSelected = (item) => isAdminNavItemActive(item, activeMenu.value)
 const handleResumeSession = () => { activeMenu.value = 'chat' }
 
 const loginAdmin = async () => {
@@ -374,6 +391,33 @@ body { background: #0d1117; }
   100% { box-shadow: 0 0 0 0 rgba(45,212,160,0); }
 }
 
+.entry-pill {
+  max-width: min(48vw, 220px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(45,212,160,0.25);
+  background: rgba(45,212,160,0.08);
+  color: #8ee7c8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.store-entry .topbar {
+  min-height: 54px;
+  padding: 0 18px;
+}
+
+.store-entry .topbar-right {
+  flex: 0 1 auto;
+}
+
+.store-entry .content {
+  padding: 14px;
+}
+
 /* ── Content ── */
 .content {
   flex: 1; overflow-y: auto; padding: 28px 32px;
@@ -509,6 +553,29 @@ body { background: #0d1117; }
     width: 100%;
     min-height: 0;
     min-width: 0;
+  }
+
+  .store-entry .main-wrap {
+    height: 100dvh;
+  }
+
+  .store-entry .topbar {
+    min-height: 50px;
+    padding: 8px 12px;
+    align-items: center;
+  }
+
+  .store-entry .topbar-left {
+    flex: 1 1 auto;
+  }
+
+  .store-entry .topbar-right {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .store-entry .content {
+    padding: 8px;
   }
 }
 

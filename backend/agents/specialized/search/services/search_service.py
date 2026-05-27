@@ -10,14 +10,14 @@ from langchain_core.tools import tool
 @tool
 def search_web(query: str, max_results: int = 5) -> str:
     """
-    Search the web for information
+    在网络上搜索信息。
     
     Args:
-        query: Search query string
-        max_results: Maximum number of results to return
+        query: 搜索关键词
+        max_results: 最多返回的结果数量
         
     Returns:
-        Search results
+        搜索结果
     """
     print(f"[Search Agent] Searching for: {query}")
     
@@ -27,14 +27,14 @@ def search_web(query: str, max_results: int = 5) -> str:
 @tool
 def get_weather(city: str, unit: str = "celsius") -> str:
     """
-    Get weather information for a city
+    查询某个城市的天气信息。
     
     Args:
-        city: City name
-        unit: Temperature unit (celsius or fahrenheit)
+        city: 城市名称
+        unit: 温度单位
         
     Returns:
-        Weather information
+        天气信息
     """
     print(f"[Search Agent] Getting weather for: {city}")
     
@@ -44,14 +44,14 @@ def get_weather(city: str, unit: str = "celsius") -> str:
 @tool
 def get_news(topic: str, limit: int = 5) -> str:
     """
-    Get latest news about a topic
+    获取某个主题的最新新闻。
     
     Args:
-        topic: News topic
-        limit: Number of news items
+        topic: 新闻主题
+        limit: 新闻条数
         
     Returns:
-        News results
+        新闻结果
     """
     print(f"[Search Agent] Getting news about: {topic}")
     
@@ -79,5 +79,5 @@ SEARCH_AGENT_INFO = {
         "新闻获取",
         "实时信息检索"
     ],
-    "keywords": ["搜索", "search", "查询", "天气", "新闻", "信息", "weather", "news"]
+    "keywords": ["搜索", "查询", "天气", "新闻", "信息检索"]
 }

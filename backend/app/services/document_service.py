@@ -58,6 +58,11 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     chunk_size: int = 500,
     chunk_overlap: int = 50,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
+    excel_rows_per_chunk: int = 1,
     image_dpi: int = 150,
     sync_graph: bool = False,
 ) -> dict:
@@ -129,6 +134,11 @@ async def upload_document(
         image_mode=kb["image_mode"],
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
+        excel_rows_per_chunk=excel_rows_per_chunk,
         image_dpi=image_dpi,
         sync_graph=sync_graph,
     )
@@ -195,9 +205,13 @@ async def start_chunking(
     background_tasks: BackgroundTasks,
     chunk_size: int = 500,
     chunk_overlap: int = 50,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
     image_dpi: int = 150,
     sync_graph: bool = False,
-    excel_rows_per_chunk: int = 50,
+    excel_rows_per_chunk: int = 1,
 ) -> dict:
     """将类目下所有文件提交到知识库切分流水线，每个文件后台异步处理"""
     category = get_category_repository().get(category_id)
@@ -245,6 +259,10 @@ async def start_chunking(
                 image_mode=kb["image_mode"],
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                parent_chunk_size=parent_chunk_size,
+                child_chunk_size=child_chunk_size,
+                chunk_strategy=chunk_strategy,
+                chunk_profile=chunk_profile,
                 image_dpi=image_dpi,
                 sync_graph=sync_graph,
                 excel_rows_per_chunk=excel_rows_per_chunk,
@@ -298,7 +316,7 @@ async def start_chunking_excel(
     category_id: str,
     kb_name: str,
     background_tasks: BackgroundTasks,
-    excel_rows_per_chunk: int = 50,
+    excel_rows_per_chunk: int = 1,
     excel_configs: list = None,
 ) -> dict:
     """
@@ -395,9 +413,13 @@ async def _run_pipeline(
     image_mode: bool,
     chunk_size: int,
     chunk_overlap: int,
-    image_dpi: int,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
+    image_dpi: int = 150,
     sync_graph: bool = False,
-    excel_rows_per_chunk: int = 50,
+    excel_rows_per_chunk: int = 1,
     excel_column_config: dict = None,
 ) -> None:
     from app.services.job_service import run_job_pipeline
@@ -411,6 +433,10 @@ async def _run_pipeline(
         image_mode=image_mode,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
         image_dpi=image_dpi,
         sync_graph=sync_graph,
         excel_rows_per_chunk=excel_rows_per_chunk,
@@ -433,6 +459,7 @@ def search_documents(
     rerank_top_n: Optional[int] = None,
 ) -> list:
     from app.services.milvus_service import get_milvus_service
+    from app.services.retrieval_bucket import search_with_bucket_fallback
     query_text_vector = None
     query_image_vector = None
     kb = get_kb_repository().get_by_name(kb_name)
@@ -443,16 +470,24 @@ def search_documents(
         query_text_vector = get_multimodal_embedding_service().embed_text(query, dimension=image_dim)
         query_image_vector = query_text_vector
 
-    hits = get_milvus_service().hybrid_search(
-        collection_name=kb_name,
+    def _search(active_filter_expr):
+        return get_milvus_service().hybrid_search(
+            collection_name=kb_name,
+            query=query,
+            top_k=top_k,
+            filter_expr=active_filter_expr,
+            ranker=ranker,
+            hybrid_alpha=hybrid_alpha,
+            keyword_filter=keyword_filter or None,
+            query_text_vector=query_text_vector,
+            query_image_vector=query_image_vector,
+        )
+
+    hits, _ = search_with_bucket_fallback(
         query=query,
         top_k=top_k,
-        filter_expr=filter_expr,
-        ranker=ranker,
-        hybrid_alpha=hybrid_alpha,
-        keyword_filter=keyword_filter or None,
-        query_text_vector=query_text_vector,
-        query_image_vector=query_image_vector,
+        search_fn=_search,
+        base_filter_expr=filter_expr,
     )
 
     # 批量查图片记录，给每个 hit 附上 image_map（placeholder → presigned URL）

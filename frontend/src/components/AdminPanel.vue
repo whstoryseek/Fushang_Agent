@@ -335,16 +335,18 @@
         <el-card shadow="hover">
           <template #header>
             <div class="card-header">
-              <span>当前 ADB 配置</span>
+              <span>当前系统配置</span>
               <el-button type="primary" size="small" @click="loadConfig" :loading="configLoading">刷新</el-button>
             </div>
           </template>
-          <el-descriptions :column="2" border v-if="config">
-            <el-descriptions-item label="实例 ID">{{ config.instance_id }}</el-descriptions-item>
-            <el-descriptions-item label="区域">{{ config.region_id }}</el-descriptions-item>
-            <el-descriptions-item label="命名空间">{{ config.namespace }}</el-descriptions-item>
-            <el-descriptions-item label="当前文档集合">{{ config.collection }}</el-descriptions-item>
-            <el-descriptions-item label="Embedding 模型" :span="2">{{ config.embedding_model }}</el-descriptions-item>
+          <el-descriptions :column="2" border v-if="configRows.length">
+            <el-descriptions-item
+              v-for="row in configRows"
+              :key="row.label"
+              :label="row.label"
+            >
+              {{ row.value }}
+            </el-descriptions-item>
           </el-descriptions>
           <el-empty v-else description="暂无配置信息" />
         </el-card>
@@ -365,6 +367,7 @@ import DocSearch from './doc/DocSearch.vue'
 import DocJobList from './doc/DocJobList.vue'
 import ChunkEditorPanel from './doc/ChunkEditorPanel.vue'
 import KnowledgeGraphPanel from './doc/KnowledgeGraphPanel.vue'
+import { buildAdminConfigRows } from '../utils/adminConfig.mjs'
 
 const props = defineProps({
   activeTab: { type: String, default: 'collections' }
@@ -427,6 +430,7 @@ const openKnowledgeGraph = (row) => {
 
 // ── 配置信息 ──────────────────────────────────────────────────────────────────
 const config = ref(null)
+const configRows = computed(() => buildAdminConfigRows(config.value || {}))
 const configLoading = ref(false)
 const loadConfig = async () => {
   configLoading.value = true

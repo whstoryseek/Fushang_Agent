@@ -54,6 +54,7 @@ from agents.knowledge import graph as graph_module
 from agents.knowledge.nodes.kg_query_route import kg_query_route
 from agents.knowledge.nodes.query_classify import query_classify
 from agents.knowledge.nodes.query_rewrite import query_rewrite
+from agents.knowledge.nodes.relevance_filter import relevance_filter
 from agents.knowledge.state import RAGConfig, RetrievalStrategy, create_initial_state
 from app.core.config import settings
 from app.services.knowledge_service import invoke_knowledge_qa
@@ -161,6 +162,20 @@ class FrontPipelineNodeTests(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["max_tokens"], 8)
         self.assertEqual(llm.chat.call_args.kwargs["timeout"], 5.0)
         self.assertEqual(llm.chat.call_args.kwargs["max_retries"], 0)
+
+    @patch("agents.knowledge.nodes.query_classify.get_llm_service")
+    def test_query_classify_accepts_chinese_output_labels(self, mock_get_llm_service):
+        llm = MagicMock()
+        llm.chat.return_value = "单文档"
+        mock_get_llm_service.return_value = llm
+        state = self._make_state("执行周期")
+        state["rewritten_query"] = "执行周期"
+
+        result = query_classify(state)
+
+        self.assertEqual(result["query_type"], "single_doc")
+        messages = llm.chat.call_args.kwargs["messages"]
+        self.assertIn("只返回：单文档 或 多文档", messages[0]["content"])
 
     @patch("agents.knowledge.nodes.query_classify.get_llm_service")
     def test_query_classify_falls_back_to_multi_doc_when_llm_fails(self, mock_get_llm_service):
@@ -295,6 +310,22 @@ class FrontPipelineNodeTests(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["max_tokens"], 8)
         self.assertEqual(llm.chat.call_args.kwargs["timeout"], 5.0)
         self.assertEqual(llm.chat.call_args.kwargs["max_retries"], 0)
+
+    @patch("agents.knowledge.nodes.relevance_filter.get_llm_service")
+    def test_relevance_filter_accepts_chinese_relevance_labels(self, mock_get_llm_service):
+        llm = MagicMock()
+        llm.chat.return_value = "1|相关\n2|不相关"
+        mock_get_llm_service.return_value = llm
+        state = self._make_state("工资制度")
+        state["rewritten_query"] = "工资制度"
+        state["merged_chunks"] = [
+            {"id": "chunk-1", "content": "工资制度说明"},
+            {"id": "chunk-2", "content": "差旅报销说明"},
+        ]
+
+        result = relevance_filter(state)
+
+        self.assertEqual([chunk["id"] for chunk in result["filtered_chunks"]], ["chunk-1"])
 
 
 class GraphRoutingTests(unittest.TestCase):

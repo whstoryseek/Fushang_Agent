@@ -3,7 +3,7 @@
   <div class="chat-wrapper">
     <!-- 知识库模式：会话侧边栏 -->
     <transition name="sidebar-slide">
-      <div v-if="chatMode === 'knowledge' && sidebarOpen" class="session-sidebar">
+      <div v-if="chatMode === 'knowledge' && sidebarOpen && !isStoreEntry" class="session-sidebar">
         <div class="sidebar-header">
           <span class="sidebar-title">对话列表</span>
           <button class="sidebar-new-btn" @click="createNewSession" :disabled="!selectedCollection">
@@ -28,10 +28,10 @@
       </div>
     </transition>
 
-    <div class="chat-main" :class="{ 'sidebar-expanded': chatMode === 'knowledge' && sidebarOpen }">
+    <div class="chat-main" :class="{ 'sidebar-expanded': chatMode === 'knowledge' && sidebarOpen && !isStoreEntry, 'store-chat-main': isStoreEntry }">
     <!-- Toolbar -->
-    <div class="chat-toolbar">
-      <div class="mode-tabs">
+    <div class="chat-toolbar" :class="{ compact: isStoreEntry }">
+      <div v-if="!isStoreEntry" class="mode-tabs">
         <button v-if="chatMode === 'knowledge'" class="icon-btn sidebar-toggle-btn"
           :class="{ active: sidebarOpen }" @click="sidebarOpen = !sidebarOpen" title="会话列表">
           <svg viewBox="0 0 16 16" fill="none">
@@ -51,7 +51,7 @@
       </div>
       <div class="toolbar-right">
         <template v-if="chatMode === 'knowledge'">
-          <div class="collection-select-wrap">
+          <div v-if="!isStoreEntry" class="collection-select-wrap">
             <el-icon class="col-icon"><data-analysis /></el-icon>
             <el-select v-model="selectedCollection" size="small" placeholder="选择知识库"
               style="width:180px" @change="clearMessages">
@@ -59,8 +59,9 @@
                 :label="col.display_name || col.name" :value="col.name" />
             </el-select>
           </div>
-          <span v-if="collections.length === 0" class="no-kb-hint">暂无知识库</span>
-          <div class="kb-options">
+          <span v-if="collections.length === 0 && !selectedCollection" class="no-kb-hint">暂无知识库</span>
+          <div v-else-if="isStoreEntry" class="store-kb-label">{{ currentCollectionLabel }}</div>
+          <div v-if="!isStoreEntry" class="kb-options">
             <el-tooltip content="开启后跳过 LLM 分类，直接使用多文档分组搜索" placement="bottom" :show-after="400">
               <button class="opt-pill" :class="{ active: forceMultiDoc }" @click="forceMultiDoc = !forceMultiDoc">
                 <span class="opt-pill-dot" />
@@ -107,10 +108,10 @@
             </transition>
           </div>
         </template>
-        <div class="mode-badge" :class="chatMode">
+        <div v-if="!isStoreEntry" class="mode-badge" :class="chatMode">
           {{ chatMode === 'general' ? 'Multi-Agent' : 'RAG + Rerank' }}
         </div>
-        <button class="icon-btn" @click="clearMessages" title="清空对话">
+        <button v-if="!isStoreEntry" class="icon-btn" @click="clearMessages" title="清空对话">
           <el-icon><delete /></el-icon>
         </button>
       </div>
@@ -242,7 +243,7 @@
         <span class="char-count" :class="{ warn: inputMessage.length > 800 }">{{ inputMessage.length }}</span>
       </div>
       <!-- 多模态图片上传按钮（仅多模态知识库显示） -->
-      <template v-if="chatMode === 'knowledge' && isMultimodalKb">
+      <template v-if="chatMode === 'knowledge' && (isMultimodalKb || isStoreEntry)">
         <input ref="queryImageInput" type="file" accept="image/*" style="display:none" @change="onQueryImageChange" />
         <button class="icon-btn img-upload-btn" :class="{ active: !!queryImagePreview }" @click="queryImageInput.click()" title="上传查询图片（多模态知识库）">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -285,12 +286,14 @@ import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiService } from '../services/api'
 import { docApi } from '../services/docApi'
+import { getDailySessionTitle } from '../utils/entryIdentity.mjs'
 import MarkdownIt from 'markdown-it'
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true })
 const props = defineProps({
   model: { type: String, default: 'qwen-turbo' },
   isAdmin: { type: Boolean, default: false },
+  entryIdentity: { type: Object, default: () => ({}) },
 })
 
 const chatMode = ref('knowledge')
@@ -359,6 +362,7 @@ const sidebarOpen = ref(!isCompactViewport())
 const sessions = ref([])
 const currentSessionId = ref('')
 const suppressCollectionWatcher = ref(false)
+const isStoreEntry = computed(() => Boolean(props.entryIdentity?.isStoreEntry))
 
 // Lightbox
 const lightbox = ref({ show: false, src: '' })
@@ -405,6 +409,37 @@ const loadSessions = async () => {
     sessions.value = res.data.data?.sessions || []
   } catch (e) {
     console.warn('加载会话列表失败:', e)
+  }
+}
+
+const currentCollectionLabel = computed(() => {
+  const col = collections.value.find(c => c.name === selectedCollection.value)
+  return col?.display_name || col?.name || selectedCollection.value || '默认知识库'
+})
+
+const preferredCollectionName = () => {
+  const preferred = String(props.entryIdentity?.kb || '').trim()
+  if (preferred) {
+    const exact = collections.value.find(c => c.name === preferred || c.display_name === preferred)
+    return exact?.name || preferred
+  }
+  return collections.value[0]?.name || ''
+}
+
+const ensureStoreDailySession = async () => {
+  if (!isStoreEntry.value || !selectedCollection.value) return
+  try {
+    await loadSessions()
+    const title = getDailySessionTitle()
+    let session = sessions.value.find(s => s.title === title)
+    if (!session) {
+      const res = await docApi.createSession(selectedCollection.value, title)
+      session = res.data.data
+      sessions.value.unshift(session)
+    }
+    if (session?.id) await switchSession(session)
+  } catch (e) {
+    console.warn('初始化每日会话失败:', e)
   }
 }
 
@@ -715,7 +750,10 @@ watch(selectedCollection, async (val) => {
   messages.value = []
   currentSessionId.value = ''
   clearQueryImage()
-  if (val) await loadSessions()
+  if (val) {
+    if (isStoreEntry.value) await ensureStoreDailySession()
+    else await loadSessions()
+  }
 })
 const formatTime = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 const uniqueFileNames = (sources) => {
@@ -733,11 +771,21 @@ onMounted(async () => {
   try {
     const { data } = await docApi.listPublicKnowledgeBases()
     collections.value = data.data?.collections || []
-    if (collections.value.length > 0) {
-      selectedCollection.value = collections.value[0].name
-      await loadSessions()
+    const initialCollection = preferredCollectionName()
+    if (initialCollection) {
+      suppressCollectionWatcher.value = true
+      try {
+        selectedCollection.value = initialCollection
+        if (isStoreEntry.value) await ensureStoreDailySession()
+        else await loadSessions()
+      } finally {
+        suppressCollectionWatcher.value = false
+      }
     }
-  } catch {}
+  } catch {
+    const fallbackCollection = preferredCollectionName()
+    if (fallbackCollection) selectedCollection.value = fallbackCollection
+  }
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
@@ -759,10 +807,17 @@ defineExpose({ clearMessages })
   box-shadow: 0 8px 40px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04) inset;
   position: relative;
 }
+:global(.store-entry) .chat-wrapper {
+  height: calc(100dvh - 74px);
+  border-radius: 12px;
+}
 .chat-main {
   display: flex; flex-direction: column; flex: 1; min-width: 0;
   width: 100%;
   max-width: 100%;
+}
+.store-chat-main {
+  background: rgba(255,255,255,0.018);
 }
 
 /* ── Session Sidebar ── */
@@ -832,6 +887,12 @@ defineExpose({ clearMessages })
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
 }
+.chat-toolbar.compact {
+  justify-content: flex-start;
+  min-height: 40px;
+  padding: 8px 14px;
+  background: rgba(255,255,255,0.012);
+}
 .mode-tabs { display: flex; gap: 4px; min-width: 0; }
 .mode-tab {
   position: relative; display: flex; align-items: center; gap: 6px;
@@ -851,6 +912,14 @@ defineExpose({ clearMessages })
 .collection-select-wrap :deep(.el-select) { max-width: 100%; }
 .col-icon { color: rgba(255,255,255,0.3); font-size: 14px; }
 .no-kb-hint { font-size: 11px; color: #f06b6b; }
+.store-kb-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255,255,255,0.5);
+  font-size: 12px;
+}
 .kb-options { display: flex; align-items: center; gap: 6px; }
 
 /* ── opt-pill toggle ── */

@@ -119,3 +119,32 @@ def graph_retrieve(state: KnowledgeAgentState) -> dict:
     except RuntimeError:
         # 无事件循环：同步执行
         return asyncio.run(async_graph_retrieve(state))
+
+
+def _graph_retrieve_sync_safe(state: KnowledgeAgentState) -> dict:
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_graph_retrieve(state))
+
+    import threading
+
+    result: Dict[str, Any] = {}
+    error: Dict[str, BaseException] = {}
+
+    def _runner():
+        try:
+            result["value"] = asyncio.run(async_graph_retrieve(state))
+        except BaseException as exc:
+            error["value"] = exc
+
+    thread = threading.Thread(target=_runner, name="kg_graph_retrieve_sync", daemon=True)
+    thread.start()
+    thread.join()
+    if error:
+        raise error["value"]
+    return result.get("value") or {"kg_graph_chunks": []}
+
+
+graph_retrieve = _graph_retrieve_sync_safe

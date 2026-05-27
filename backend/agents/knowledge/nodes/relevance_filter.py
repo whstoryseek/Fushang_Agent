@@ -15,6 +15,23 @@ from app.core.prompts import KNOWLEDGE_RELEVANCE_FILTER_SYSTEM
 logger = logging.getLogger(__name__)
 
 
+def _parse_relevance_label(label: str) -> bool | None:
+    normalized = (label or "").strip().lower()
+    if not normalized:
+        return None
+    if (
+        "不相关" in normalized
+        or "无关" in normalized
+        or "irrelevant" in normalized
+        or "not relevant" in normalized
+        or "not_relevant" in normalized
+    ):
+        return False
+    if "相关" in normalized or "relevant" in normalized:
+        return True
+    return None
+
+
 def relevance_filter(state: KnowledgeAgentState) -> dict:
     start_time = datetime.now()
 
@@ -77,10 +94,12 @@ def relevance_filter(state: KnowledgeAgentState) -> dict:
                         if len(parts) == 2:
                             try:
                                 chunk_idx = int(parts[0].strip()) - 1
-                                relevance = parts[1].strip().lower()
+                                relevance = parts[1].strip()
                                 if 0 <= chunk_idx < len(batch):
                                     chunk = batch[chunk_idx]
-                                    is_relevant = "relevant" in relevance
+                                    is_relevant = _parse_relevance_label(relevance)
+                                    if is_relevant is None:
+                                        continue
                                     filter_decisions.append({
                                         "chunk_id": _chunk_id(chunk),
                                         "is_relevant": is_relevant,

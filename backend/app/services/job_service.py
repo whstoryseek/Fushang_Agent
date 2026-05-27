@@ -45,6 +45,10 @@ async def run_job_pipeline(
     chunk_size: int,
     chunk_overlap: int,
     image_dpi: int,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
     sync_graph: bool = False,
     excel_rows_per_chunk: int = 50,
     excel_column_config: dict = None,
@@ -78,6 +82,10 @@ async def run_job_pipeline(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 image_dpi=image_dpi,
+                parent_chunk_size=parent_chunk_size,
+                child_chunk_size=child_chunk_size,
+                chunk_strategy=chunk_strategy,
+                chunk_profile=chunk_profile,
             )
         else:
             chunks, excel_image_data = await asyncio.to_thread(
@@ -87,6 +95,10 @@ async def run_job_pipeline(
                 job_id=job_id,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                parent_chunk_size=parent_chunk_size,
+                child_chunk_size=child_chunk_size,
+                chunk_strategy=chunk_strategy,
+                chunk_profile=chunk_profile,
                 excel_rows_per_chunk=excel_rows_per_chunk,
                 excel_column_config=excel_column_config,
             )
@@ -375,6 +387,10 @@ def _parse_image_mode(
     chunk_size: int,
     chunk_overlap: int,
     image_dpi: int,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
 ):
     from app.services.doc_image_parser import parse_pdf, parse_word
     ext = file_name.lower().rsplit(".", 1)[-1]
@@ -387,6 +403,10 @@ def _parse_image_mode(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             image_dpi=image_dpi,
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
+            chunk_strategy=chunk_strategy,
+            chunk_profile=chunk_profile,
         )
     elif ext == "docx":
         return parse_word(
@@ -396,6 +416,10 @@ def _parse_image_mode(
             file_name=file_name,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
+            chunk_strategy=chunk_strategy,
+            chunk_profile=chunk_profile,
         )
     else:
         raise ValueError(f"图文模式不支持格式: {ext}")
@@ -409,6 +433,10 @@ def _parse_text_mode(
     job_id: str,
     chunk_size: int,
     chunk_overlap: int,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
     excel_rows_per_chunk: int = 50,
     excel_column_config: dict = None,
 ) -> Tuple[list, list]:
@@ -418,8 +446,10 @@ def _parse_text_mode(
     返回 (chunks, image_data)
     """
     from app.services.chunk_splitter import split_text_with_metadata, split_excel
+    from app.services.retrieval_bucket import infer_retrieval_bucket, resolve_chunking_strategy
 
     ext = file_name.lower().rsplit(".", 1)[-1]
+    retrieval_bucket = infer_retrieval_bucket(file_name)
 
     # Excel 走专用切分逻辑（支持图片列）
     if ext in ("xlsx", "xls"):
@@ -428,16 +458,35 @@ def _parse_text_mode(
             file_name=file_name,
             job_id=job_id,
             rows_per_chunk=excel_rows_per_chunk,
-            base_metadata={"file_name": file_name, "source": ext},
+            base_metadata={
+                "file_name": file_name,
+                "source": ext,
+                "retrieval_bucket": retrieval_bucket,
+                "chunk_profile": chunk_profile,
+            },
             column_config=excel_column_config,
         )
 
     text = _extract_text(file_content, ext, file_name)
+    resolved_chunk_strategy = resolve_chunking_strategy(
+        file_name=file_name,
+        chunk_profile=chunk_profile,
+        requested_chunk_strategy=chunk_strategy,
+    )
     chunks = split_text_with_metadata(
         text=text,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        base_metadata={"file_name": file_name, "source": ext},
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=resolved_chunk_strategy,
+        parent_id_prefix=job_id,
+        base_metadata={
+            "file_name": file_name,
+            "source": ext,
+            "retrieval_bucket": retrieval_bucket,
+            "chunk_profile": chunk_profile,
+        },
     )
     return chunks, []
 

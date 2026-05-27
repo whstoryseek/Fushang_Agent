@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { buildEntryHeaders } from '../utils/entryIdentity.mjs'
 
 const TOKEN_KEY = 'rag_admin_token'
 const USER_KEY = 'rag_admin_user'
@@ -43,6 +44,7 @@ export const clearAuthSession = () => {
 export const attachAuthHeaders = (config = {}) => {
   config.headers = config.headers || {}
   config.headers['X-Guest-Id'] = getGuestId()
+  Object.assign(config.headers, buildEntryHeaders())
   const token = getAuthToken()
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config

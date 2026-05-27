@@ -91,6 +91,20 @@ class JobRepository(BaseRepository):
             (job_id,),
         )
 
+    def mark_needs_vectorization(self, job_id: str, stage: str = "切片已修改，待重新向量化"):
+        self._execute_sql(
+            """
+            UPDATE knowledge_job
+            SET vectorized = FALSE,
+                status = 'chunked',
+                stage = %s,
+                progress = 50,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (stage, job_id),
+        )
+
     def delete(self, job_id: str):
         self._execute_sql("DELETE FROM knowledge_job WHERE id = %s", (job_id,))
 

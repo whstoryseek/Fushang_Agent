@@ -103,6 +103,35 @@ class KnowledgeApiTicketRaceTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_called_once()
         process_ticket.assert_not_called()
 
+    async def test_normal_rag_answer_records_resolved_ai_ticket(self):
+        async def fake_rag(**kwargs):
+            return _rag_result(
+                answer="只有门店负责人才有开户权限。",
+                sources=[{"file_name": "wechat-submerchant.docx", "content": "开户步骤"}],
+            )
+
+        with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-1"), patch(
+            "app.api.v1.knowledge.invoke_knowledge_qa",
+            side_effect=fake_rag,
+        ), patch(
+            "app.api.v1.knowledge.classify_ticket_intent_with_llm",
+            return_value={"intent_class": "D", "needs_ticket_flow": False, "fields": {}, "missing_fields": []},
+        ), patch("app.api.v1.knowledge.persist_knowledge_result") as persist, patch(
+            "app.api.v1.knowledge.record_ai_resolved_ticket",
+            create=True,
+        ) as record_ticket:
+            response = await knowledge.knowledge_qa(
+                KnowledgeRequest(query="微信子商户号开户资料是什么？", session_id="session-1", collection="kb"),
+                user_id="store-1",
+            )
+
+        self.assertEqual(response.finish_reason, "stop")
+        persist.assert_called_once()
+        record_ticket.assert_called_once()
+        self.assertEqual(record_ticket.call_args.kwargs["status"], "resolved_ai")
+        self.assertEqual(record_ticket.call_args.kwargs["query"], "微信子商户号开户资料是什么？")
+        self.assertEqual(record_ticket.call_args.kwargs["user_id"], "store-1")
+
     async def test_a_classifier_before_deadline_uses_rag_candidates_for_llm_sop_analysis(self):
         rag_started = asyncio.Event()
 
@@ -275,6 +304,112 @@ class KnowledgeApiTicketRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.answer, "normal rag answer")
         self.assertEqual(classify.call_count, 1)
+        process_ticket.assert_not_called()
+        persist.assert_called_once()
+
+    async def test_active_clarification_reply_updates_ticket_before_rag(self):
+        active = {
+            "id": "ticket-1",
+            "clarification_round": 1,
+            "clarification": {
+                "intent_class": "A",
+                "original_query": "帮我开通权限",
+                "required_fields": ["issue_detail", "phone", "store"],
+                "missing_fields": ["phone", "store"],
+                "collected": {"issue_detail": "开通权限"},
+            },
+        }
+        continuation = {
+            "intent_class": "A",
+            "needs_ticket_flow": True,
+            "fields": {"phone": "13800138000"},
+            "missing_fields": ["store"],
+            "question": "请继续补充门店名称。",
+        }
+        ticket = {
+            "answer": "请继续补充门店名称。",
+            "confidence": 0.0,
+            "finish_reason": "clarification",
+            "clarification": {"intent_class": "A", "missing_fields": ["store"]},
+        }
+
+        with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-1"), patch(
+            "app.api.v1.knowledge.find_active_clarification_ticket",
+            return_value=active,
+            create=True,
+        ) as find_active, patch(
+            "app.api.v1.knowledge.analyze_clarification_reply_with_llm",
+            return_value=continuation,
+            create=True,
+        ) as analyze, patch(
+            "app.api.v1.knowledge.process_ticket_clarification_turn",
+            return_value=ticket,
+        ) as process_ticket, patch(
+            "app.api.v1.knowledge.invoke_knowledge_qa",
+            return_value=_rag_result(),
+        ) as rag, patch("app.api.v1.knowledge.persist_knowledge_result") as persist:
+            response = await knowledge.knowledge_qa(
+                KnowledgeRequest(query="手机号 13800138000", session_id="session-1", collection="kb"),
+                user_id="store-1",
+            )
+
+        self.assertEqual(response.finish_reason, "clarification")
+        find_active.assert_called_once()
+        analyze.assert_called_once()
+        process_ticket.assert_called_once()
+        self.assertTrue(process_ticket.call_args.kwargs["continue_only"])
+        self.assertEqual(process_ticket.call_args.kwargs["decision"]["fields"]["phone"], "13800138000")
+        rag.assert_not_called()
+        persist.assert_not_called()
+
+    async def test_active_clarification_reply_can_return_to_rag_and_resolve_ticket(self):
+        active = {
+            "id": "ticket-1",
+            "clarification_round": 1,
+            "clarification": {
+                "intent_class": "C",
+                "original_query": "这个怎么弄",
+                "turns": [{"round": 1, "query": "这个怎么弄", "answer": "请补充具体场景。"}],
+            },
+        }
+        continuation = {
+            "intent_class": "D",
+            "needs_ticket_flow": False,
+            "fields": {},
+            "missing_fields": [],
+            "question": "",
+            "resolved_query": "微信子商户号开户需要什么资料？",
+        }
+
+        async def fake_rag(**kwargs):
+            self.assertEqual(kwargs["query"], "微信子商户号开户需要什么资料？")
+            return _rag_result(answer="需要营业执照、法人信息和银行卡。")
+
+        with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-1"), patch(
+            "app.api.v1.knowledge.find_active_clarification_ticket",
+            return_value=active,
+            create=True,
+        ), patch(
+            "app.api.v1.knowledge.analyze_clarification_reply_with_llm",
+            return_value=continuation,
+            create=True,
+        ), patch(
+            "app.api.v1.knowledge.invoke_knowledge_qa",
+            side_effect=fake_rag,
+        ), patch(
+            "app.api.v1.knowledge.resolve_active_clarification_with_rag",
+            create=True,
+        ) as resolve_ticket, patch("app.api.v1.knowledge.persist_knowledge_result") as persist, patch(
+            "app.api.v1.knowledge.process_ticket_clarification_turn"
+        ) as process_ticket:
+            response = await knowledge.knowledge_qa(
+                KnowledgeRequest(query="微信子商户号开户需要什么资料？", session_id="session-1", collection="kb"),
+                user_id="store-1",
+            )
+
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertIn("营业执照", response.answer)
+        resolve_ticket.assert_called_once()
         process_ticket.assert_not_called()
         persist.assert_called_once()
 

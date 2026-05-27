@@ -108,16 +108,16 @@ def format_agents_info() -> str:
     Returns:
         Formatted string describing available agents
     """
-    info = "Available Specialized Agents:\n\n"
+    info = "可用专用智能体：\n\n"
     
     for agent_name, agent_data in SUB_AGENTS_REGISTRY.items():
         agent_info = agent_data["info"]
         info += f"**{agent_info['display_name']}** ({agent_info['name']})\n"
-        info += f"  Description: {agent_info['description']}\n"
-        info += f"  Capabilities:\n"
+        info += f"  描述：{agent_info['description']}\n"
+        info += f"  能力：\n"
         for cap in agent_info['capabilities']:
             info += f"    - {cap}\n"
-        info += f"  Keywords: {', '.join(agent_info['keywords'])}\n\n"
+        info += f"  关键词：{', '.join(agent_info['keywords'])}\n\n"
     
     return info
 

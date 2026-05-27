@@ -10,6 +10,32 @@ from datetime import datetime
 from ..state import KnowledgeAgentState, AnswerQuality
 
 
+NO_ANSWER_PHRASES = [
+    "[NO_KNOWLEDGE]",
+    "当前知识库未包含",
+    "知识库未包含",
+    "无法为您解答",
+    "无法解答该问题",
+    "无法回答该问题",
+    "无法找到相关信息",
+    "没有找到相关",
+    "未找到相关",
+    "找不到相关",
+    "未检索到相关",
+    "没有检索到相关",
+]
+
+
+def _is_missing_knowledge_answer(answer: str) -> bool:
+    if not answer:
+        return False
+    # 优先检测硬标记（最可靠）
+    if "[NO_KNOWLEDGE]" in answer:
+        return True
+    normalized = "".join(answer.split()).lower()
+    return any(phrase.lower() in normalized for phrase in NO_ANSWER_PHRASES)
+
+
 def check_quality(state: KnowledgeAgentState) -> Dict[str, Any]:
     """
     Check answer quality and apply fallback if needed
@@ -45,9 +71,16 @@ def check_quality(state: KnowledgeAgentState) -> Dict[str, Any]:
         # Check 2: Confidence threshold
         if confidence < config.min_confidence_threshold:
             quality_issues.append(f"Confidence {confidence:.2f} below threshold {config.min_confidence_threshold}")
-        
+
+        missing_knowledge_answer = _is_missing_knowledge_answer(answer)
+        if missing_knowledge_answer:
+            quality_issues.append("Answer states knowledge base has no relevant content")
+
         # Determine quality level
-        if not quality_issues:
+        if missing_knowledge_answer:
+            quality_level = AnswerQuality.LOW
+            quality_passed = False
+        elif not quality_issues:
             quality_level = AnswerQuality.HIGH
             quality_passed = True
         elif len(quality_issues) == 1:
@@ -65,7 +98,11 @@ def check_quality(state: KnowledgeAgentState) -> Dict[str, Any]:
         if not quality_passed and config.enable_fallback:
             used_fallback = True
             fallback_reason = "; ".join(quality_issues)
-            final_answer = config.fallback_message
+            if missing_knowledge_answer:
+                # 去掉硬标记，保留用户友好的文案
+                final_answer = answer.replace("[NO_KNOWLEDGE]", "").strip()
+            else:
+                final_answer = config.fallback_message
         
         print(f"[Quality Check] Quality: {quality_level.value}, Passed: {quality_passed}")
         if used_fallback:

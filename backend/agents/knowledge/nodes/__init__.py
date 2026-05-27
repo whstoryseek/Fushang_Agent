@@ -7,6 +7,7 @@ Each node represents a step in the RAG pipeline
 from .query_rewrite import query_rewrite
 from .query_classify import query_classify
 from .retrieval_strategy import determine_retrieval_strategy
+from .kg_query_route import kg_query_route
 from .graph_retrieve import graph_retrieve  # 保留向后兼容，async_graph_retrieve 供 retrieve 节点内部调用
 from .single_doc_retrieve import single_doc_retrieve
 from .multi_doc_retrieve import multi_doc_retrieve

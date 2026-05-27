@@ -28,19 +28,71 @@ def _score(chunk) -> float:
     return getattr(chunk, "rerank_score", None) or getattr(chunk, "score", 0.0) or 0.0
 
 
+def _chunk_id(chunk) -> str:
+    if isinstance(chunk, dict):
+        return chunk.get("chunk_id") or chunk.get("id", "") or ""
+    return getattr(chunk, "chunk_id", "") or getattr(chunk, "id", "") or ""
+
+
+def _metadata(chunk) -> dict:
+    if isinstance(chunk, dict):
+        meta = chunk.get("metadata", {}) or {}
+        return meta if isinstance(meta, dict) else {}
+    meta = getattr(chunk, "metadata", {}) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _collapse_by_parent_candidates(candidates):
+    grouped = {}
+
+    for candidate in candidates:
+        metadata = _metadata(candidate)
+        candidate_id = _chunk_id(candidate)
+        parent_id = metadata.get("parent_id") or candidate_id or f"candidate-{len(grouped)}"
+        score = _score(candidate)
+
+        if parent_id not in grouped:
+            grouped[parent_id] = {
+                "best": candidate,
+                "best_score": score,
+                "count": 1,
+            }
+            continue
+
+        grouped[parent_id]["count"] += 1
+        if score > grouped[parent_id]["best_score"]:
+            grouped[parent_id]["best"] = candidate
+            grouped[parent_id]["best_score"] = score
+
+    collapsed = []
+    for parent_id, data in grouped.items():
+        best = data["best"]
+        metadata = {**_metadata(best)}
+        metadata["parent_hit_count"] = data["count"]
+        metadata["representative_child_id"] = _chunk_id(best)
+        if isinstance(best, dict):
+            collapsed.append({**best, "metadata": metadata})
+        else:
+            best.metadata = metadata
+            collapsed.append(best)
+
+    return sorted(collapsed, key=_score, reverse=True)
+
+
 def select_top_k_chunks(state: KnowledgeAgentState) -> Dict[str, Any]:
     """
     统一的截断 / rerank 节点，single_doc 和 multi_doc 路径共用。
     """
     # 数据来源：filtered_chunks 优先，为空则用 merged_chunks
     candidates = state.get("filtered_chunks") or state.get("merged_chunks") or []
+    collapsed_candidates = _collapse_by_parent_candidates(candidates)
     config = state["config"]
 
     is_multi_doc = state.get("query_type") == "multi_doc"  # 以 query_type 为准确路径判断
     is_multimodal = getattr(config, "kb_type", "standard") == "multimodal"
     rerank_enabled = getattr(config, "rerank_enabled", False) and not is_multimodal
 
-    print(f"\n[SelectTopK] candidates={len(candidates)}, rerank={rerank_enabled}, multi_doc={is_multi_doc}")
+    print(f"\n[SelectTopK] candidates={len(candidates)}, collapsed={len(collapsed_candidates)}, rerank={rerank_enabled}, multi_doc={is_multi_doc}")
 
     try:
         if rerank_enabled and candidates:
@@ -56,7 +108,7 @@ def select_top_k_chunks(state: KnowledgeAgentState) -> Dict[str, Any]:
             from app.services.rerank_service import get_rerank_service
             top_chunks = get_rerank_service().rerank(
                 query=query,
-                chunks=candidates,
+                chunks=collapsed_candidates,
                 model=model,
                 top_n=top_k,
             )
@@ -64,7 +116,7 @@ def select_top_k_chunks(state: KnowledgeAgentState) -> Dict[str, Any]:
         else:
             # ── 原始 score 排序路径 ──────────────────────────────────────────
             top_k = getattr(config, "llm_context_top_k", 10)
-            top_chunks = sorted(candidates, key=_score, reverse=True)[:top_k]
+            top_chunks = sorted(collapsed_candidates, key=_score, reverse=True)[:top_k]
             method = "score_sort"
 
         print(f"[SelectTopK] method={method}, selected={len(top_chunks)}")
@@ -81,6 +133,7 @@ def select_top_k_chunks(state: KnowledgeAgentState) -> Dict[str, Any]:
                 "timestamp": datetime.now().isoformat(),
                 "method": method,
                 "chunks_in": len(candidates),
+                "chunks_after_parent_collapse": len(collapsed_candidates),
                 "chunks_out": len(top_chunks),
             }],
         }

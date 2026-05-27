@@ -46,10 +46,15 @@ def ensure_knowledge_session(
 ) -> str:
     normalized_session_id = (session_id or "").strip()
     if normalized_session_id and normalized_session_id != DEFAULT_SESSION_ID:
-        session = get_conversation_repository().get_session(normalized_session_id)
+        try:
+            session = get_conversation_repository().get_session(normalized_session_id)
+        except Exception as exc:
+            logger.warning("会话 ID 无法查询，按新会话处理: %s", exc)
+            session = None
+            normalized_session_id = ""
         if session:
             _assert_session_owner(session, user_id)
-        return normalized_session_id
+            return normalized_session_id
     if not collection:
         return normalized_session_id or DEFAULT_SESSION_ID
 

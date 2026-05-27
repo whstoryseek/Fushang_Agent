@@ -227,6 +227,17 @@ class ServiceTicketRepository(BaseRepository):
         )
         return self._norm_ticket(rows[0]) if rows else None
 
+    def delete(self, ticket_id: str) -> bool:
+        rows = self._execute_returning(
+            """
+            DELETE FROM service_ticket
+            WHERE id = %s
+            RETURNING id
+            """,
+            (ticket_id,),
+        )
+        return bool(rows)
+
     def update_clarification(
         self,
         ticket_id: str,

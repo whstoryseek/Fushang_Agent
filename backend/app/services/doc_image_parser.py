@@ -10,7 +10,7 @@ import io
 import logging
 import re
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 from docx import Document as DocxDocument
@@ -242,6 +242,100 @@ def extract_word_text(file_content: bytes) -> str:
     return "\n\n".join(blocks)
 
 
+def _rebind_image_records(chunks: List[Dict[str, Any]], image_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not chunks or not image_records:
+        return image_records
+
+    sort_by_chunk: Dict[str, int] = {}
+    for record in image_records:
+        placeholder = record.get("placeholder") or ""
+        target_chunk = None
+
+        for chunk in chunks:
+            if placeholder and placeholder in (chunk.get("content") or ""):
+                target_chunk = chunk
+                break
+
+        if target_chunk is None:
+            for chunk in chunks:
+                parent_content = (chunk.get("metadata") or {}).get("parent_content", "")
+                if placeholder and placeholder in parent_content:
+                    target_chunk = chunk
+                    break
+
+        if target_chunk is None:
+            target_chunk = chunks[0]
+
+        chunk_id = target_chunk["chunk_id"]
+        record["chunk_id"] = chunk_id
+        record["sort_order"] = sort_by_chunk.get(chunk_id, 0)
+        sort_by_chunk[chunk_id] = record["sort_order"] + 1
+
+    return image_records
+
+
+def _finalize_stream_chunks(
+    stream_text: str,
+    image_records: List[Dict[str, Any]],
+    file_name: str,
+    job_id: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    parent_chunk_size: Optional[int],
+    child_chunk_size: Optional[int],
+    chunk_strategy: str,
+    chunk_profile: str,
+    base_metadata: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    from app.services.chunk_splitter import split_text_with_metadata
+    from app.services.retrieval_bucket import infer_retrieval_bucket, resolve_chunking_strategy
+
+    retrieval_bucket = infer_retrieval_bucket(file_name)
+    resolved_chunk_strategy = resolve_chunking_strategy(
+        file_name=file_name,
+        chunk_profile=chunk_profile,
+        requested_chunk_strategy=chunk_strategy,
+    )
+
+    chunks = split_text_with_metadata(
+        text=stream_text,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=resolved_chunk_strategy,
+        parent_id_prefix=job_id,
+        base_metadata={
+            "file_name": file_name,
+            "retrieval_bucket": retrieval_bucket,
+            "chunk_profile": chunk_profile,
+            **base_metadata,
+        },
+    )
+
+    for index, chunk in enumerate(chunks):
+        chunk_id = str(uuid.uuid4())
+        chunk["chunk_id"] = chunk_id
+        chunk["chunk_index"] = index
+        metadata = chunk.get("metadata") or {}
+        metadata.update({
+            "chunk_id": chunk_id,
+            "chunk_index": index,
+            "prev_chunk_id": None,
+            "next_chunk_id": None,
+        })
+        chunk["metadata"] = metadata
+
+    for index, chunk in enumerate(chunks):
+        metadata = chunk["metadata"]
+        if index > 0:
+            metadata["prev_chunk_id"] = chunks[index - 1]["chunk_id"]
+        if index < len(chunks) - 1:
+            metadata["next_chunk_id"] = chunks[index + 1]["chunk_id"]
+
+    return chunks, _rebind_image_records(chunks, image_records)
+
+
 def parse_pdf(
     file_content: bytes,
     job_id: str,
@@ -250,6 +344,10 @@ def parse_pdf(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     image_dpi: int = 150,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     doc = fitz.open(stream=file_content, filetype="pdf")
 
@@ -304,77 +402,16 @@ def parse_pdf(
     doc.close()
 
     elements.sort(key=lambda element: (element["page"], element["y_center"]))
-
-    file_base = _file_base(file_name)
-    chunks: List[Dict] = []
     image_records: List[Dict] = []
-
-    buffer = ""
-    text_len = 0
-    chunk_idx = 0
-    img_sort = 0
-    overlap_buf = ""
-    first_page = None
-
-    def _new_chunk_id() -> str:
-        return str(uuid.uuid4())
-
-    current_chunk_id = _new_chunk_id()
-
-    def _seal() -> None:
-        nonlocal buffer, text_len, chunk_idx, img_sort, overlap_buf, first_page, current_chunk_id
-        if buffer.strip():
-            chunks.append(
-                {
-                    "chunk_id": current_chunk_id,
-                    "chunk_index": chunk_idx,
-                    "content": buffer,
-                    "metadata": {
-                        "page": first_page,
-                        "chunk_id": current_chunk_id,
-                        "prev_chunk_id": None,
-                        "next_chunk_id": None,
-                    },
-                }
-            )
-            overlap_buf = _smart_overlap(_IMAGE_RE.sub("", buffer), chunk_overlap)
-        chunk_idx += 1
-        img_sort = 0
-        buffer = ""
-        text_len = 0
-        first_page = None
-        current_chunk_id = _new_chunk_id()
+    stream_parts: List[str] = []
+    provisional_chunk_id = str(uuid.uuid4())
+    image_sort = 0
+    first_page = elements[0]["page"] if elements else None
 
     for element in elements:
         if element["type"] == "text":
-            text = element["text"]
-            if first_page is None:
-                first_page = element["page"]
-
-            if not buffer and overlap_buf:
-                buffer = overlap_buf
-                text_len = len(overlap_buf)
-                overlap_buf = ""
-
-            remaining = text
-            while remaining:
-                space = chunk_size - text_len
-                part = remaining[:space]
-                buffer += part
-                text_len += len(part)
-                remaining = remaining[space:]
-                if text_len >= chunk_size:
-                    _seal()
-                    if remaining and overlap_buf:
-                        buffer = overlap_buf
-                        text_len = len(overlap_buf)
-                        overlap_buf = ""
+            stream_parts.append(element["text"])
             continue
-
-        if not buffer and overlap_buf:
-            buffer = overlap_buf
-            text_len = len(overlap_buf)
-            overlap_buf = ""
 
         try:
             oss_key = _upload_image(
@@ -382,44 +419,41 @@ def parse_pdf(
                 element["ext"],
                 collection,
                 file_name,
-                current_chunk_id,
+                provisional_chunk_id,
             )
         except Exception as exc:  # pragma: no cover - network failure
             logger.warning("[Parser] image upload failed: %s", exc)
             continue
 
         placeholder = f"<<IMAGE:{uuid.uuid4().hex[:8]}>>"
-        buffer += placeholder
+        stream_parts.append(placeholder)
         image_records.append(
             {
                 "id": str(uuid.uuid4()),
-                "chunk_id": current_chunk_id,
+                "chunk_id": provisional_chunk_id,
                 "job_id": job_id,
                 "placeholder": placeholder,
                 "oss_key": oss_key,
                 "page": element["page"],
-                "sort_order": img_sort,
+                "sort_order": image_sort,
             }
         )
-        img_sort += 1
+        image_sort += 1
 
-    if buffer.strip():
-        chunks.append(
-            {
-                "chunk_id": current_chunk_id,
-                "chunk_index": chunk_idx,
-                "content": buffer,
-                "metadata": {
-                    "page": first_page,
-                    "chunk_id": current_chunk_id,
-                    "prev_chunk_id": None,
-                    "next_chunk_id": None,
-                },
-            }
-        )
-
-    chunks, image_records = _post_process(chunks, image_records, file_base)
-    return chunks, image_records
+    stream_text = "\n\n".join(part.strip() for part in stream_parts if part and part.strip())
+    return _finalize_stream_chunks(
+        stream_text=stream_text,
+        image_records=image_records,
+        file_name=file_name,
+        job_id=job_id,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
+        base_metadata={"page": first_page, "source": "pdf"},
+    )
 
 
 def parse_word(
@@ -429,81 +463,29 @@ def parse_word(
     file_name: str,
     chunk_size: int = 500,
     chunk_overlap: int = 50,
+    parent_chunk_size: Optional[int] = None,
+    child_chunk_size: Optional[int] = None,
+    chunk_strategy: str = "parent_child",
+    chunk_profile: str = "smart_mix",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     doc = DocxDocument(io.BytesIO(file_content))
     tokenized_content = "\n\n".join(extract_word_blocks(file_content))
 
-    file_base = _file_base(file_name)
-    chunks: List[Dict] = []
     image_records: List[Dict] = []
-
-    buffer = ""
-    text_len = 0
-    chunk_idx = 0
-    img_sort = 0
-    overlap_buf = ""
+    stream_parts: List[str] = []
+    provisional_chunk_id = str(uuid.uuid4())
+    image_sort = 0
     bound_relations: set[str] = set()
 
-    def _new_chunk_id() -> str:
-        return str(uuid.uuid4())
-
-    current_chunk_id = _new_chunk_id()
-
-    def _seal() -> None:
-        nonlocal buffer, text_len, chunk_idx, img_sort, overlap_buf, current_chunk_id
-        if buffer.strip():
-            chunks.append(
-                {
-                    "chunk_id": current_chunk_id,
-                    "chunk_index": chunk_idx,
-                    "content": buffer,
-                    "metadata": {
-                        "page": None,
-                        "chunk_id": current_chunk_id,
-                        "prev_chunk_id": None,
-                        "next_chunk_id": None,
-                    },
-                }
-            )
-            overlap_buf = _smart_overlap(_IMAGE_RE.sub("", buffer), chunk_overlap)
-        chunk_idx += 1
-        img_sort = 0
-        buffer = ""
-        text_len = 0
-        current_chunk_id = _new_chunk_id()
-
     def _append_text(text: str) -> None:
-        nonlocal buffer, text_len, overlap_buf
-        if not text:
-            return
-        if not buffer and overlap_buf:
-            buffer = overlap_buf
-            text_len = len(overlap_buf)
-            overlap_buf = ""
-
-        remaining = text
-        while remaining:
-            space = chunk_size - text_len
-            part = remaining[:space]
-            buffer += part
-            text_len += len(part)
-            remaining = remaining[space:]
-            if text_len >= chunk_size:
-                _seal()
-                if remaining and overlap_buf:
-                    buffer = overlap_buf
-                    text_len = len(overlap_buf)
-                    overlap_buf = ""
+        cleaned = _strip_image_refs(text).strip()
+        if cleaned:
+            stream_parts.append(cleaned)
 
     def _insert_image(relation_id: str) -> None:
-        nonlocal img_sort, buffer, text_len, overlap_buf
+        nonlocal image_sort
         if not relation_id or relation_id in bound_relations:
             return
-
-        if not buffer and overlap_buf:
-            buffer = overlap_buf
-            text_len = len(overlap_buf)
-            overlap_buf = ""
 
         try:
             image_part = doc.part.related_parts[relation_id]
@@ -511,26 +493,26 @@ def parse_word(
             if len(image_bytes) < 1000:
                 return
             ext = image_part.content_type.split("/")[-1].replace("jpeg", "jpg")
-            oss_key = _upload_image(image_bytes, ext, collection, file_name, current_chunk_id)
+            oss_key = _upload_image(image_bytes, ext, collection, file_name, provisional_chunk_id)
         except Exception as exc:  # pragma: no cover - network/format failure
             logger.warning("[WordParser] image extraction failed rId=%s: %s", relation_id, exc)
             return
 
         placeholder = f"<<IMAGE:{uuid.uuid4().hex[:8]}>>"
-        buffer += placeholder
+        stream_parts.append(placeholder)
         image_records.append(
             {
                 "id": str(uuid.uuid4()),
-                "chunk_id": current_chunk_id,
+                "chunk_id": provisional_chunk_id,
                 "job_id": job_id,
                 "placeholder": placeholder,
                 "oss_key": oss_key,
                 "page": None,
-                "sort_order": img_sort,
+                "sort_order": image_sort,
             }
         )
         bound_relations.add(relation_id)
-        img_sort += 1
+        image_sort += 1
 
     cursor = 0
     for match in _IMAGE_REF_RE.finditer(tokenized_content):
@@ -539,20 +521,17 @@ def parse_word(
         cursor = match.end()
     _append_text(tokenized_content[cursor:])
 
-    if buffer.strip():
-        chunks.append(
-            {
-                "chunk_id": current_chunk_id,
-                "chunk_index": chunk_idx,
-                "content": buffer,
-                "metadata": {
-                    "page": None,
-                    "chunk_id": current_chunk_id,
-                    "prev_chunk_id": None,
-                    "next_chunk_id": None,
-                },
-            }
-        )
-
-    chunks, image_records = _post_process(chunks, image_records, file_base)
-    return chunks, image_records
+    stream_text = "\n\n".join(part.strip() for part in stream_parts if part and part.strip())
+    return _finalize_stream_chunks(
+        stream_text=stream_text,
+        image_records=image_records,
+        file_name=file_name,
+        job_id=job_id,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        chunk_strategy=chunk_strategy,
+        chunk_profile=chunk_profile,
+        base_metadata={"page": None, "source": "docx"},
+    )

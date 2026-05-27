@@ -14,7 +14,7 @@ from ..state import KnowledgeAgentState
 logger = logging.getLogger(__name__)
 
 QUERY_CLASSIFY_MAX_TOKENS = 8
-QUERY_CLASSIFY_TIMEOUT_SECONDS = 8.0
+QUERY_CLASSIFY_TIMEOUT_SECONDS = 5.0
 QUERY_CLASSIFY_MAX_RETRIES = 0
 
 STRONG_MULTI_DOC_KEYWORDS = (
@@ -227,9 +227,9 @@ def query_classify(state: KnowledgeAgentState) -> dict:
             logger.warning("[QueryClassify] LLM 调用失败，默认 multi_doc: %s", exc)
             classification = ""
 
-        if "single" in classification:
+        if "单文档" in classification or "single" in classification:
             query_type = "single_doc"
-        elif "multi" in classification:
+        elif "多文档" in classification or "multi" in classification:
             query_type = "multi_doc"
         else:
             logger.warning("[QueryClassify] 无法识别分类结果: %r，默认 multi_doc", classification)

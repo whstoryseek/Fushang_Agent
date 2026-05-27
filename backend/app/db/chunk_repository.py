@@ -17,6 +17,32 @@ class ChunkRepository(BaseRepository):
 
     # ── 写入 ──────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _split_parent_payloads(job_id: str, chunks: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[tuple]]:
+        """
+        将父块内容从 child metadata 中拆出，单独写 knowledge_chunk_parent。
+
+        child metadata 中保留 parent_id / parent_index / child_index 等轻量字段，
+        parent_content 改为只在检索命中后按 parent_id 懒加载回填。
+        """
+        cleaned_chunks: List[Dict[str, Any]] = []
+        parent_map: Dict[str, tuple] = {}
+
+        for chunk in chunks:
+            normalized = dict(chunk)
+            metadata = dict(normalized.get("metadata") or {})
+            parent_id = metadata.get("parent_id")
+            parent_content = metadata.pop("parent_content", None)
+            parent_index = int(metadata.get("parent_index", 0) or 0)
+
+            if parent_id and parent_content and parent_id not in parent_map:
+                parent_map[parent_id] = (parent_id, job_id, parent_index, parent_content)
+
+            normalized["metadata"] = metadata
+            cleaned_chunks.append(normalized)
+
+        return cleaned_chunks, list(parent_map.values())
+
     def bulk_insert(self, job_id: str, file_name: str, chunks: List[Dict[str, Any]]):
         """
         标准模式批量写入。
@@ -25,7 +51,9 @@ class ChunkRepository(BaseRepository):
         """
         if not chunks:
             return
+        chunks, parent_params = self._split_parent_payloads(job_id, chunks)
         self._execute_sql("DELETE FROM knowledge_chunk WHERE job_id = %s", (job_id,))
+        self._execute_sql("DELETE FROM knowledge_chunk_parent WHERE job_id = %s", (job_id,))
 
         chunk_params, origin_params = [], []
         for idx, chunk in enumerate(chunks):
@@ -43,6 +71,12 @@ class ChunkRepository(BaseRepository):
             "INSERT INTO knowledge_chunk_origin(chunk_id, content) VALUES (%s, %s) ON CONFLICT (chunk_id) DO NOTHING",
             origin_params,
         )
+        if parent_params:
+            self._execute_many(
+                "INSERT INTO knowledge_chunk_parent(parent_id, job_id, parent_index, content) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (parent_id) DO UPDATE SET job_id = EXCLUDED.job_id, parent_index = EXCLUDED.parent_index, content = EXCLUDED.content",
+                parent_params,
+            )
 
     def bulk_insert_with_ids(self, job_id: str, file_name: str, chunks: List[Dict[str, Any]]):
         """
@@ -51,7 +85,9 @@ class ChunkRepository(BaseRepository):
         """
         if not chunks:
             return
+        chunks, parent_params = self._split_parent_payloads(job_id, chunks)
         self._execute_sql("DELETE FROM knowledge_chunk WHERE job_id = %s", (job_id,))
+        self._execute_sql("DELETE FROM knowledge_chunk_parent WHERE job_id = %s", (job_id,))
 
         chunk_params, origin_params = [], []
         for enumerate_idx, chunk in enumerate(chunks):
@@ -70,6 +106,12 @@ class ChunkRepository(BaseRepository):
             "INSERT INTO knowledge_chunk_origin(chunk_id, content) VALUES (%s, %s) ON CONFLICT (chunk_id) DO NOTHING",
             origin_params,
         )
+        if parent_params:
+            self._execute_many(
+                "INSERT INTO knowledge_chunk_parent(parent_id, job_id, parent_index, content) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (parent_id) DO UPDATE SET job_id = EXCLUDED.job_id, parent_index = EXCLUDED.parent_index, content = EXCLUDED.content",
+                parent_params,
+            )
 
     # ── 查询 ──────────────────────────────────────────────────────────────────
 
@@ -91,7 +133,9 @@ class ChunkRepository(BaseRepository):
         rows = self._execute_select(
             "SELECT * FROM knowledge_chunk WHERE id = %s LIMIT 1", (chunk_id,)
         )
-        return self._normalize(rows[0]) if rows else None
+        if not rows:
+            return None
+        return self._attach_parent_contents([self._normalize(rows[0])])[0]
 
     def get_by_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
         """批量查询切片（用于检索后回填 PG 原始内容）"""
@@ -102,7 +146,17 @@ class ChunkRepository(BaseRepository):
             f"SELECT * FROM knowledge_chunk WHERE id IN ({placeholders})",
             tuple(chunk_ids),
         )
-        return [self._normalize(r) for r in rows]
+        return self._attach_parent_contents([self._normalize(r) for r in rows])
+
+    def get_parent_contents(self, parent_ids: List[str]) -> Dict[str, str]:
+        if not parent_ids:
+            return {}
+        placeholders = ",".join(["%s"] * len(parent_ids))
+        rows = self._execute_select(
+            f"SELECT parent_id, content FROM knowledge_chunk_parent WHERE parent_id IN ({placeholders})",
+            tuple(parent_ids),
+        )
+        return {str(r["parent_id"]): r.get("content", "") for r in rows if r.get("parent_id")}
 
     def get_by_ids_with_file_names(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
         """批量查询切片并 JOIN 文件名（知识图谱组装上下文等）"""
@@ -129,7 +183,7 @@ class ChunkRepository(BaseRepository):
                 meta = {**meta, "file_name": file_name}
             base["metadata"] = meta
             out.append(base)
-        return out
+        return self._attach_parent_contents(out)
 
     def list_all_job_ids(self) -> List[str]:
         rows = self._execute_select("SELECT DISTINCT job_id FROM knowledge_chunk")
@@ -208,6 +262,7 @@ class ChunkRepository(BaseRepository):
     def delete_by_job(self, job_id: str):
         # ON DELETE CASCADE 会自动删 origin 和 image
         self._execute_sql("DELETE FROM knowledge_chunk WHERE job_id = %s", (job_id,))
+        self._execute_sql("DELETE FROM knowledge_chunk_parent WHERE job_id = %s", (job_id,))
 
     def delete_chunk(self, chunk_id: str):
         self._execute_sql("DELETE FROM knowledge_chunk WHERE id = %s", (chunk_id,))
@@ -238,6 +293,27 @@ class ChunkRepository(BaseRepository):
             "metadata": metadata,
             "updated_at": str(row["updated_at"]) if row.get("updated_at") else None,
         }
+
+    def _attach_parent_contents(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not chunks:
+            return chunks
+
+        parent_ids = list({
+            (chunk.get("metadata") or {}).get("parent_id")
+            for chunk in chunks
+            if (chunk.get("metadata") or {}).get("parent_id")
+            and not (chunk.get("metadata") or {}).get("parent_content")
+        })
+        if not parent_ids:
+            return chunks
+
+        parent_map = self.get_parent_contents(parent_ids)
+        for chunk in chunks:
+            metadata = chunk.get("metadata") or {}
+            parent_id = metadata.get("parent_id")
+            if parent_id and parent_id in parent_map and "parent_content" not in metadata:
+                chunk["metadata"] = {**metadata, "parent_content": parent_map[parent_id]}
+        return chunks
 
 
 _instance: Optional[ChunkRepository] = None
