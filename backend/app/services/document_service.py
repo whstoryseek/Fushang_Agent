@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import os
 import re
 from typing import Optional
 
@@ -24,6 +25,26 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXT = {".pdf", ".doc", ".docx", ".txt", ".md", ".ppt", ".pptx", ".xlsx", ".xls"}
 # 允许：字母、数字、中文、下划线、连字符、点、空格
 _SAFE_FILENAME_RE = re.compile(r'^[\w\u4e00-\u9fff\-\. ]+$')
+_PIPELINE_SEMAPHORE = None
+_PIPELINE_SEMAPHORE_LIMIT = None
+
+
+def _pipeline_concurrency_limit() -> int:
+    raw = str(os.getenv("PIPELINE_MAX_CONCURRENCY", "2") or "2").strip()
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 2
+    return max(1, min(limit, 4))
+
+
+def _get_pipeline_semaphore() -> asyncio.Semaphore:
+    global _PIPELINE_SEMAPHORE, _PIPELINE_SEMAPHORE_LIMIT
+    limit = _pipeline_concurrency_limit()
+    if _PIPELINE_SEMAPHORE is None or _PIPELINE_SEMAPHORE_LIMIT != limit:
+        _PIPELINE_SEMAPHORE = asyncio.Semaphore(limit)
+        _PIPELINE_SEMAPHORE_LIMIT = limit
+    return _PIPELINE_SEMAPHORE
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -423,25 +444,26 @@ async def _run_pipeline(
     excel_column_config: dict = None,
 ) -> None:
     from app.services.job_service import run_job_pipeline
-    await run_job_pipeline(
-        job_id=job_id,
-        file_id=file_id,
-        kb_id=kb_id,
-        kb_name=kb_name,
-        file_name=file_name,
-        oss_key=oss_key,
-        image_mode=image_mode,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        parent_chunk_size=parent_chunk_size,
-        child_chunk_size=child_chunk_size,
-        chunk_strategy=chunk_strategy,
-        chunk_profile=chunk_profile,
-        image_dpi=image_dpi,
-        sync_graph=sync_graph,
-        excel_rows_per_chunk=excel_rows_per_chunk,
-        excel_column_config=excel_column_config,
-    )
+    async with _get_pipeline_semaphore():
+        await run_job_pipeline(
+            job_id=job_id,
+            file_id=file_id,
+            kb_id=kb_id,
+            kb_name=kb_name,
+            file_name=file_name,
+            oss_key=oss_key,
+            image_mode=image_mode,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
+            chunk_strategy=chunk_strategy,
+            chunk_profile=chunk_profile,
+            image_dpi=image_dpi,
+            sync_graph=sync_graph,
+            excel_rows_per_chunk=excel_rows_per_chunk,
+            excel_column_config=excel_column_config,
+        )
 
 
 # ── 文档检索 ──────────────────────────────────────────────────────────────────

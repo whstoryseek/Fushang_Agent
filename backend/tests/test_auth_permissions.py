@@ -48,7 +48,7 @@ class AuthPermissionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_admin_dependency_accepts_admin_token(self):
+    def test_admin_dependency_accepts_super_admin_token(self):
         app = FastAPI()
 
         @app.get("/protected")
@@ -59,6 +59,7 @@ class AuthPermissionTests(unittest.TestCase):
             subject="user-1",
             username="admin",
             role="admin",
+            admin_role="super_admin",
         )
 
         response = TestClient(app).get(
@@ -69,6 +70,28 @@ class AuthPermissionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"username": "admin", "role": "admin"})
 
+    def test_admin_dependency_accepts_sub_admin_token(self):
+        app = FastAPI()
+
+        @app.get("/protected")
+        async def protected(admin=Depends(require_admin)):
+            return {"username": admin["username"], "role": admin["role"]}
+
+        token = auth_service.create_access_token(
+            subject="user-2",
+            username="child-admin",
+            role="admin",
+            admin_role="sub_admin",
+        )
+
+        response = TestClient(app).get(
+            "/protected",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"username": "child-admin", "role": "admin"})
+
     def test_admin_routes_reject_anonymous_requests_before_db_access(self):
         response = TestClient(create_app()).get("/api/v1/admin/collections")
 
@@ -78,6 +101,57 @@ class AuthPermissionTests(unittest.TestCase):
         response = TestClient(create_app()).get("/api/v1/files", params={"kb_name": "kb_demo"})
 
         self.assertEqual(response.status_code, 401)
+
+    def test_super_admin_can_create_sub_admin_with_default_password(self):
+        app = create_app()
+        token = auth_service.create_access_token(
+            subject="user-1",
+            username="admin",
+            role="admin",
+            admin_role="super_admin",
+        )
+
+        with patch("app.api.v1.admin.users.get_auth_user_repository") as mock_get_repo:
+            repo = mock_get_repo.return_value
+            repo.get_by_username.return_value = None
+            repo.create_user.return_value = {
+                "id": "user-3",
+                "username": "ops01",
+                "password_hash": auth_service.hash_password("88888888"),
+                "role": "sub_admin",
+                "is_active": True,
+                "created_at": None,
+                "updated_at": None,
+            }
+
+            response = TestClient(app).post(
+                "/api/v1/admin/users/sub-admin",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"username": "ops01"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["user"]["username"], "ops01")
+        self.assertEqual(data["user"]["role"], "sub_admin")
+        self.assertEqual(data["default_password"], "88888888")
+
+    def test_sub_admin_cannot_create_sub_admin(self):
+        app = create_app()
+        token = auth_service.create_access_token(
+            subject="user-2",
+            username="child-admin",
+            role="admin",
+            admin_role="sub_admin",
+        )
+
+        response = TestClient(app).post(
+            "/api/v1/admin/users/sub-admin",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"username": "ops01"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_public_knowledge_base_list_exposes_safe_fields_without_auth(self):
         fake_kbs = [

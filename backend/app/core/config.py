@@ -49,6 +49,7 @@ class Settings:
     default_model: str = os.getenv("LLM_MODEL", "doubao-seed-2-0-pro-260215")
     llm_clean_model: str = os.getenv("LLM_CLEAN_MODEL", "doubao-seed-2-0-lite-260428")
     operation_classifier_model: str = os.getenv("OPERATION_CLASSIFIER_MODEL", "doubao-seed-2-0-mini-260428")
+    operation_image_analysis_model: str = os.getenv("OPERATION_IMAGE_ANALYSIS_MODEL", "doubao-seed-2-0-pro-260215")
     operation_classifier_timeout: float = float(os.getenv("OPERATION_CLASSIFIER_TIMEOUT", "8"))
     temperature: float = 0.0
     max_tokens: int = 2000
@@ -131,6 +132,12 @@ SUPPORTED_MODELS = {
     "doubao-seed-2-0-pro-260215": {
         "name": "doubao-seed-2-0-pro-260215",
         "description": "火山引擎 Doubao 多模态模型，支持文本和图像理解",
+        "provider": "volces",
+        "max_tokens": 32000,
+    },
+    "doubao-seed-2-0-mini-260428": {
+        "name": "doubao-seed-2-0-mini-260428",
+        "description": "火山引擎 Doubao 轻量模型，适合快速问答与轻量工单分析",
         "provider": "volces",
         "max_tokens": 32000,
     },

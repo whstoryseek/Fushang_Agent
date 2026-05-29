@@ -108,10 +108,6 @@ async def multimodal_retrieve(
             }
             if retrieval_strategy == RetrievalStrategy.KEYWORD_ONLY:
                 kwargs["keyword_filter"] = keyword_filter or query
-            else:
-                kwargs["group_by_field"] = group_by_field
-                kwargs["group_size"] = group_size
-                kwargs["strict_group_size"] = strict_group_size
             return milvus_svc.hybrid_search(**kwargs)
 
         chunks, bucket_log = search_with_bucket_fallback(

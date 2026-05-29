@@ -1,8 +1,40 @@
 # -*- coding: utf-8 -*-
 import json
+import sys
+import types
 import unittest
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
+
+if "psycopg2" not in sys.modules:
+    psycopg2_module = types.ModuleType("psycopg2")
+    psycopg2_module.pool = types.SimpleNamespace(ThreadedConnectionPool=object)
+    psycopg2_module.extras = types.SimpleNamespace(RealDictCursor=object)
+    sys.modules["psycopg2"] = psycopg2_module
+    sys.modules["psycopg2.pool"] = psycopg2_module.pool
+    sys.modules["psycopg2.extras"] = psycopg2_module.extras
+
+if "dashscope" not in sys.modules:
+    dashscope_module = types.ModuleType("dashscope")
+    dashscope_module.TextEmbedding = types.SimpleNamespace(call=lambda *args, **kwargs: None)
+    dashscope_module.api_key = ""
+    sys.modules["dashscope"] = dashscope_module
+
+if "pymilvus" not in sys.modules:
+    pymilvus_module = types.ModuleType("pymilvus")
+    pymilvus_module.MilvusClient = object
+    pymilvus_module.DataType = types.SimpleNamespace(
+        VARCHAR="VARCHAR",
+        INT64="INT64",
+        SPARSE_FLOAT_VECTOR="SPARSE_FLOAT_VECTOR",
+        FLOAT_VECTOR="FLOAT_VECTOR",
+    )
+    pymilvus_module.Function = object
+    pymilvus_module.FunctionType = types.SimpleNamespace(BM25="BM25")
+    pymilvus_module.AnnSearchRequest = object
+    pymilvus_module.RRFRanker = object
+    pymilvus_module.WeightedRanker = object
+    sys.modules["pymilvus"] = pymilvus_module
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 
@@ -19,6 +51,9 @@ def _json_body(response):
 
 
 class ApiRouteContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_system_supports_doubao_mini_model(self):
+        self.assertIn("doubao-seed-2-0-mini-260428", system.SUPPORTED_MODELS)
+
     @patch("app.api.v1.system.SUPPORTED_MODELS", {"demo-model": {"description": "Demo", "provider": "mock", "max_tokens": 4096}})
     async def test_system_endpoints_return_expected_shapes(self):
         root_payload = await system.root()
@@ -31,15 +66,22 @@ class ApiRouteContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health_payload.status, "healthy")
 
     @patch("app.api.v1.auth.create_access_token", return_value="token-123")
-    @patch("app.api.v1.auth.authenticate_admin", return_value={"id": "u1", "username": "admin", "role": "admin"})
+    @patch("app.api.v1.auth.authenticate_admin", return_value={"id": "u1", "username": "ops01", "role": "sub_admin"})
     async def test_auth_login_success_returns_token_payload(self, mock_authenticate, mock_create_token):
-        response = await login(LoginRequest(username="admin", password="secret"))
+        response = await login(LoginRequest(username="ops01", password="secret"))
 
         payload = _json_body(response)
         self.assertTrue(payload["success"])
         self.assertEqual(payload["data"]["access_token"], "token-123")
-        mock_authenticate.assert_called_once_with("admin", "secret")
-        mock_create_token.assert_called_once()
+        self.assertEqual(payload["data"]["user"]["role"], "admin")
+        self.assertEqual(payload["data"]["user"]["admin_role"], "sub_admin")
+        mock_authenticate.assert_called_once_with("ops01", "secret")
+        mock_create_token.assert_called_once_with(
+            subject="u1",
+            username="ops01",
+            role="admin",
+            admin_role="sub_admin",
+        )
 
     @patch("app.api.v1.auth.authenticate_admin", return_value=None)
     async def test_auth_login_rejects_invalid_credentials(self, _mock_authenticate):

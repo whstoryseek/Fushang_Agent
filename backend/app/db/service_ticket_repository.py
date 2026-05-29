@@ -6,12 +6,41 @@
 service_ticket_context，便于后台回看和回修原始切片。
 """
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+import psycopg2.extras
 
 from app.db.base_repository import BaseRepository
+from app.db import pg_client
 
 
 class ServiceTicketRepository(BaseRepository):
+    @staticmethod
+    def _select_with_conn(conn, sql: str, params: tuple) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _returning_with_conn(conn, sql: str, params: tuple) -> List[Dict[str, Any]]:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _sql_with_conn(conn, sql: str, params: tuple) -> None:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+
+    @staticmethod
+    def _many_with_conn(conn, sql: str, params_list: List[tuple]) -> None:
+        if not params_list:
+            return
+        with conn.cursor() as cur:
+            cur.executemany(sql, params_list)
+
     def create_with_contexts(
         self,
         *,
@@ -30,47 +59,61 @@ class ServiceTicketRepository(BaseRepository):
         session_id: Optional[str] = None,
         sender_id: Optional[str] = None,
         requester_name: Optional[str] = None,
+        entry_user_id: Optional[str] = None,
+        entry_user_name: Optional[str] = None,
+        entry_source: Optional[str] = None,
         clarification_round: int = 0,
         clarification: Optional[Dict[str, Any]] = None,
         contexts: Optional[List[Dict[str, Any]]] = None,
+        conn=None,
     ) -> Dict[str, Any]:
-        rows = self._execute_returning(
-            """
+        sql = """
             INSERT INTO service_ticket
                 (session_id, user_id, user_name, kb_name, query, answer, status,
                  confidence, fallback_reason, quality_level, sources, channel, processing_ms,
-                 sender_id, requester_name, clarification_round, clarification)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 sender_id, requester_name, entry_user_id, entry_user_name, entry_source,
+                 clarification_round, clarification)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
-            """,
-            (
-                session_id,
-                user_id,
-                user_name,
-                kb_name,
-                query,
-                answer,
-                status,
-                confidence,
-                fallback_reason,
-                quality_level,
-                json.dumps(sources or [], ensure_ascii=False),
-                channel or "web",
-                processing_ms,
-                sender_id,
-                requester_name,
-                int(clarification_round or 0),
-                json.dumps(clarification or {}, ensure_ascii=False),
-            ),
+        """
+        params = (
+            session_id,
+            user_id,
+            user_name,
+            kb_name,
+            query,
+            answer,
+            status,
+            confidence,
+            fallback_reason,
+            quality_level,
+            json.dumps(sources or [], ensure_ascii=False),
+            channel or "web",
+            processing_ms,
+            sender_id,
+            requester_name,
+            entry_user_id,
+            entry_user_name,
+            entry_source,
+            int(clarification_round or 0),
+            json.dumps(clarification or {}, ensure_ascii=False),
+        )
+        rows = (
+            self._returning_with_conn(conn, sql, params)
+            if conn is not None
+            else self._execute_returning(sql, params)
         )
         ticket = self._norm_ticket(rows[0]) if rows else {}
         if ticket and contexts:
-            self._insert_contexts(ticket["id"], contexts)
+            self._insert_contexts(ticket["id"], contexts, conn=conn)
         return ticket
 
-    def replace_contexts(self, ticket_id: str, contexts: List[Dict[str, Any]]) -> None:
-        self._execute_sql("DELETE FROM service_ticket_context WHERE ticket_id = %s", (ticket_id,))
-        self._insert_contexts(ticket_id, contexts)
+    def replace_contexts(self, ticket_id: str, contexts: List[Dict[str, Any]], conn=None) -> None:
+        if conn is not None:
+            self._sql_with_conn(conn, "DELETE FROM service_ticket_context WHERE ticket_id = %s", (ticket_id,))
+        else:
+            self._execute_sql("DELETE FROM service_ticket_context WHERE ticket_id = %s", (ticket_id,))
+        self._insert_contexts(ticket_id, contexts, conn=conn)
 
     def find_active_clarification(
         self,
@@ -78,6 +121,8 @@ class ServiceTicketRepository(BaseRepository):
         session_id: Optional[str],
         user_id: str,
         kb_name: Optional[str] = None,
+        for_update: bool = False,
+        conn=None,
     ) -> Optional[Dict[str, Any]]:
         conditions = ["status = 'clarifying'", "user_id = %s"]
         params: List[Any] = [user_id]
@@ -87,19 +132,47 @@ class ServiceTicketRepository(BaseRepository):
         if kb_name:
             conditions.append("(kb_name = %s OR kb_name IS NULL)")
             params.append(kb_name)
-        rows = self._execute_select(
-            f"""
+        sql = f"""
             SELECT *
             FROM service_ticket
             WHERE {' AND '.join(conditions)}
             ORDER BY updated_at DESC
             LIMIT 1
-            """,
-            tuple(params),
+        """
+        if for_update:
+            sql += "\n            FOR UPDATE"
+        rows = (
+            self._select_with_conn(conn, sql, tuple(params))
+            if conn is not None
+            else self._execute_select(sql, tuple(params))
         )
         return self._norm_ticket(rows[0]) if rows else None
 
-    def _insert_contexts(self, ticket_id: str, contexts: List[Dict[str, Any]]) -> None:
+    def run_clarification_transaction(
+        self,
+        *,
+        session_id: Optional[str],
+        user_id: str,
+        kb_name: Optional[str],
+        callback: Callable[[Optional[Dict[str, Any]], Any], Any],
+    ):
+        lock_scope = f"{session_id or ''}|{kb_name or ''}"
+        with pg_client.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    (str(user_id or ""), lock_scope),
+                )
+            active = self.find_active_clarification(
+                session_id=session_id,
+                user_id=user_id,
+                kb_name=kb_name,
+                for_update=True,
+                conn=conn,
+            )
+            return callback(active, conn)
+
+    def _insert_contexts(self, ticket_id: str, contexts: List[Dict[str, Any]], conn=None) -> None:
         if not contexts:
             return
         params = []
@@ -117,14 +190,15 @@ class ServiceTicketRepository(BaseRepository):
                     ctx.get("sort_order", idx),
                 )
             )
-        self._execute_many(
-            """
+        sql = """
             INSERT INTO service_ticket_context
                 (ticket_id, chunk_id, job_id, file_name, chunk_index, score, content, metadata, sort_order)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            params,
-        )
+        """
+        if conn is not None:
+            self._many_with_conn(conn, sql, params)
+        else:
+            self._execute_many(sql, params)
 
     def list(
         self,
@@ -212,7 +286,7 @@ class ServiceTicketRepository(BaseRepository):
         if status is not None:
             parts.append("status = %s")
             params.append(status)
-            if status in ("resolved_ai", "resolved_manual", "ignored"):
+            if status in ("resolved_ai", "resolved_manual", "ignored", "unanswered_normal"):
                 parts.append("resolved_at = COALESCE(resolved_at, NOW())")
         if answer is not None:
             parts.append("answer = %s")
@@ -249,6 +323,7 @@ class ServiceTicketRepository(BaseRepository):
         sender_id: Optional[str] = None,
         requester_name: Optional[str] = None,
         note: Optional[str] = None,
+        conn=None,
     ) -> Optional[Dict[str, Any]]:
         parts = [
             "updated_at = NOW()",
@@ -263,6 +338,8 @@ class ServiceTicketRepository(BaseRepository):
             int(clarification_round or 0),
             json.dumps(clarification or {}, ensure_ascii=False),
         ]
+        if status in ("resolved_ai", "resolved_manual", "ignored", "unanswered_normal"):
+            parts.append("resolved_at = COALESCE(resolved_at, NOW())")
         if sender_id is not None:
             parts.append("sender_id = %s")
             params.append(sender_id)
@@ -273,9 +350,11 @@ class ServiceTicketRepository(BaseRepository):
             parts.append("note = %s")
             params.append(note)
         params.append(ticket_id)
-        rows = self._execute_returning(
-            f"UPDATE service_ticket SET {', '.join(parts)} WHERE id = %s RETURNING *",
-            tuple(params),
+        sql = f"UPDATE service_ticket SET {', '.join(parts)} WHERE id = %s RETURNING *"
+        rows = (
+            self._returning_with_conn(conn, sql, tuple(params))
+            if conn is not None
+            else self._execute_returning(sql, tuple(params))
         )
         return self._norm_ticket(rows[0]) if rows else None
 
@@ -389,6 +468,9 @@ class ServiceTicketRepository(BaseRepository):
             "processing_ms": float(row["processing_ms"]) if row.get("processing_ms") is not None else None,
             "sender_id": row.get("sender_id"),
             "requester_name": row.get("requester_name"),
+            "entry_user_id": row.get("entry_user_id"),
+            "entry_user_name": row.get("entry_user_name"),
+            "entry_source": row.get("entry_source"),
             "clarification_round": int(row.get("clarification_round") or 0),
             "clarification": cls._loads_json(row.get("clarification"), {}),
             "note": row.get("note"),

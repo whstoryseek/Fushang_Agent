@@ -61,13 +61,14 @@ export const apiService = {
   },
 
   // Knowledge base query
-  async knowledgeQuery(query, sessionId = 'default', model = null, collection = null, forceMultiDoc = null, keywordFilter = null, queryImage = null) {
+  async knowledgeQuery(query, sessionId = 'default', model = null, collection = null, forceMultiDoc = null, keywordFilter = null, queryImage = null, queryImages = null) {
     const payload = { query, session_id: sessionId }
     if (model) payload.model = model
     if (collection) payload.collection = collection
     if (forceMultiDoc != null) payload.force_multi_doc = forceMultiDoc
     if (keywordFilter) payload.keyword_filter = keywordFilter
     if (queryImage) payload.query_image = queryImage
+    if (queryImages?.length) payload.query_images = queryImages
 
     const response = await api.post('/knowledge', payload)
     return response.data
@@ -85,6 +86,7 @@ export const apiService = {
       ...(payload.force_multi_doc != null && { force_multi_doc: payload.force_multi_doc }),
       ...(payload.keyword_filter && { keyword_filter: payload.keyword_filter }),
       ...(payload.query_image && { query_image: payload.query_image }),
+      ...(payload.query_images?.length && { query_images: payload.query_images }),
     }
     const res = await fetch('/api/v1/knowledge/stream', {
       method: 'POST',
@@ -161,13 +163,23 @@ export const apiService = {
   },
 
   // Knowledge base QA (alias for better naming)
-  async knowledgeQA(query, model = null, sessionId = 'default', collection = null, forceMultiDoc = null, keywordFilter = null, queryImage = null) {
-    return this.knowledgeQuery(query, sessionId, model, collection, forceMultiDoc, keywordFilter, queryImage)
+  async knowledgeQA(query, model = null, sessionId = 'default', collection = null, forceMultiDoc = null, keywordFilter = null, queryImage = null, queryImages = null) {
+    return this.knowledgeQuery(query, sessionId, model, collection, forceMultiDoc, keywordFilter, queryImage, queryImages)
   },
 
   // Admin: knowledge base collections
   async listCollections() {
     const response = await api.get('/admin/collections')
+    return response.data
+  },
+
+  async listAdminUsers() {
+    const response = await api.get('/admin/users')
+    return response.data
+  },
+
+  async createSubAdmin(username) {
+    const response = await api.post('/admin/users/sub-admin', { username })
     return response.data
   },
 

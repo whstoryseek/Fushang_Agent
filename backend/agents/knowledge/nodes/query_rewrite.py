@@ -125,6 +125,7 @@ def query_rewrite(state: KnowledgeAgentState) -> dict:
                 max_tokens=REWRITE_MAX_TOKENS,
                 timeout=REWRITE_TIMEOUT_SECONDS,
                 max_retries=REWRITE_MAX_RETRIES,
+                disable_thinking=True,
             ).strip()
         except Exception as exc:
             logger.warning("[QueryRewrite] LLM 调用失败，回退原 query: %s", exc)

@@ -4,7 +4,7 @@ import types
 import unittest
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -40,6 +40,7 @@ class AuthServiceTests(unittest.TestCase):
             subject="admin-user-id",
             username="admin",
             role="admin",
+            admin_role="super_admin",
             expires_delta=timedelta(minutes=5),
         )
 
@@ -48,6 +49,7 @@ class AuthServiceTests(unittest.TestCase):
         self.assertEqual(payload["sub"], "admin-user-id")
         self.assertEqual(payload["username"], "admin")
         self.assertEqual(payload["role"], "admin")
+        self.assertEqual(payload["admin_role"], "super_admin")
 
     def test_seed_admin_creates_missing_admin_with_hashed_password(self):
         repo = Mock()
@@ -62,7 +64,7 @@ class AuthServiceTests(unittest.TestCase):
         repo.create_user.assert_called_once()
         kwargs = repo.create_user.call_args.kwargs
         self.assertEqual(kwargs["username"], "admin")
-        self.assertEqual(kwargs["role"], "admin")
+        self.assertEqual(kwargs["role"], "super_admin")
         self.assertNotEqual(kwargs["password_hash"], "admin-secret")
         self.assertTrue(auth_service.verify_password("admin-secret", kwargs["password_hash"]))
 
@@ -80,6 +82,40 @@ class AuthServiceTests(unittest.TestCase):
         kwargs = repo.update_password.call_args.kwargs
         self.assertEqual(kwargs["user_id"], "user-1")
         self.assertTrue(auth_service.verify_password("new-secret", kwargs["password_hash"]))
+        self.assertEqual(kwargs["role"], "super_admin")
+
+    def test_authenticate_admin_accepts_sub_admin_role(self):
+        repo = Mock()
+        repo.get_by_username.return_value = {
+            "id": "user-2",
+            "username": "child-admin",
+            "password_hash": auth_service.hash_password("88888888"),
+            "role": "sub_admin",
+            "is_active": True,
+        }
+
+        with patch("app.services.auth_service.get_auth_user_repository", return_value=repo):
+            user = auth_service.authenticate_admin("child-admin", "88888888")
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user["role"], "sub_admin")
+
+    def test_seed_admin_creates_super_admin_with_hashed_password(self):
+        repo = Mock()
+        repo.get_by_username.return_value = None
+
+        auth_service.seed_admin_user(
+            username="admin",
+            password="admin-secret",
+            repo=repo,
+        )
+
+        repo.create_user.assert_called_once()
+        kwargs = repo.create_user.call_args.kwargs
+        self.assertEqual(kwargs["username"], "admin")
+        self.assertEqual(kwargs["role"], "super_admin")
+        self.assertNotEqual(kwargs["password_hash"], "admin-secret")
+        self.assertTrue(auth_service.verify_password("admin-secret", kwargs["password_hash"]))
 
 
 if __name__ == "__main__":

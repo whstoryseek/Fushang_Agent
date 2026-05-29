@@ -1,6 +1,5 @@
 <template>
   <div id="app" :class="{ 'store-entry': entryIdentity.isStoreEntry }">
-    <!-- Aurora background blobs -->
     <div class="aurora-bg" aria-hidden="true">
       <div class="blob blob-1" />
       <div class="blob blob-2" />
@@ -9,7 +8,6 @@
     </div>
 
     <div class="app-layout">
-      <!-- Icon sidebar -->
       <aside v-if="!entryIdentity.isStoreEntry" class="sidebar">
         <div class="sidebar-logo">
           <div class="logo-mark" style="font-size:12px; font-weight:700;">
@@ -19,8 +17,13 @@
 
         <nav class="nav-list">
           <div class="nav-section-title">问答</div>
-          <el-tooltip v-for="item in qaNavItems" :key="item.key"
-            :content="item.label" placement="right" effect="dark">
+          <el-tooltip
+            v-for="item in qaNavItems"
+            :key="item.key"
+            :content="item.label"
+            placement="right"
+            effect="dark"
+          >
             <button
               class="nav-item"
               :class="{ active: activeMenu === item.key }"
@@ -32,8 +35,13 @@
           </el-tooltip>
 
           <div v-if="isAdmin" class="nav-section-title" style="margin-top:12px;">管理</div>
-          <el-tooltip v-for="item in visibleAdminNavItems" :key="item.key"
-            :content="item.label" placement="right" effect="dark">
+          <el-tooltip
+            v-for="item in visibleAdminNavItems"
+            :key="item.key"
+            :content="item.label"
+            placement="right"
+            effect="dark"
+          >
             <button
               class="nav-item"
               :class="{ active: isAdminNavItemSelected(item) }"
@@ -46,9 +54,7 @@
         </nav>
       </aside>
 
-      <!-- Main -->
       <div class="main-wrap">
-        <!-- Topbar -->
         <header class="topbar">
           <div class="topbar-left">
             <span class="page-title">{{ pageTitle }}</span>
@@ -61,11 +67,18 @@
                 <el-option v-for="m in availableModels" :key="m.name" :label="m.name" :value="m.name" />
               </el-select>
             </div>
-            <el-button v-if="!isAdmin && !entryIdentity.isStoreEntry" size="small" plain @click="loginDialogVisible = true">
+            <el-button
+              v-if="!isAdmin && !entryIdentity.isStoreEntry"
+              size="small"
+              plain
+              @click="loginDialogVisible = true"
+            >
               管理员登录
             </el-button>
             <div v-else-if="isAdmin && !entryIdentity.isStoreEntry" class="admin-session">
-              <el-tag size="small" type="success">{{ currentAdmin?.username || 'admin' }}</el-tag>
+              <el-tag size="small" type="success">
+                {{ currentAdmin?.username || 'admin' }}
+              </el-tag>
               <el-button size="small" plain @click="logoutAdmin">退出</el-button>
             </div>
             <div v-if="entryIdentity.isStoreEntry" class="entry-pill">
@@ -78,15 +91,33 @@
           </div>
         </header>
 
-        <!-- Content -->
         <main class="content">
-          <div v-show="activeMenu === 'chat'"><SimpleChat :model="selectedModel" :is-admin="isAdmin && !entryIdentity.isStoreEntry" :entry-identity="entryIdentity" /></div>
-          <div v-if="!entryIdentity.isStoreEntry" v-show="activeMenu === 'user-history'"><UserHistory /></div>
+          <div v-show="activeMenu === 'chat'">
+            <SimpleChat
+              :model="selectedModel"
+              :is-admin="isAdmin && !entryIdentity.isStoreEntry"
+              :entry-identity="entryIdentity"
+            />
+          </div>
+          <div v-if="!entryIdentity.isStoreEntry" v-show="activeMenu === 'user-history'">
+            <UserHistory />
+          </div>
           <template v-if="isAdmin && !entryIdentity.isStoreEntry">
-            <div v-if="activeMenu === 'admin-data-import'"><AdminDataImport :collection="selectedCollection" /></div>
-            <div v-else-if="activeMenu === 'admin-data-view'"><AdminDataView /></div>
-            <div v-else-if="activeMenu === 'admin-service-tickets'"><AdminServiceTickets /></div>
-            <div v-else-if="isAdminPanelMenu(activeMenu)"><AdminPanel :active-tab="adminTab" /></div>
+            <div v-if="activeMenu === 'admin-data-import'">
+              <AdminDataImport :collection="selectedCollection" />
+            </div>
+            <div v-else-if="activeMenu === 'admin-data-view'">
+              <AdminDataView />
+            </div>
+            <div v-else-if="activeMenu === 'admin-service-tickets'">
+              <AdminServiceTickets />
+            </div>
+            <div v-else-if="activeMenu === 'admin-users' && isSuperAdmin">
+              <AdminUserManagement />
+            </div>
+            <div v-else-if="isAdminPanelMenu(activeMenu)">
+              <AdminPanel :active-tab="adminTab" />
+            </div>
           </template>
         </main>
       </div>
@@ -98,7 +129,12 @@
           <el-input v-model="loginForm.username" autocomplete="username" />
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="loginForm.password" type="password" autocomplete="current-password" show-password />
+          <el-input
+            v-model="loginForm.password"
+            type="password"
+            autocomplete="current-password"
+            show-password
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -110,30 +146,35 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { AUTH_EXPIRED_EVENT, authService, getStoredAdmin } from './services/auth'
-import { apiService } from './services/api'
-import SimpleChat from './components/SimpleChat.vue'
+
 import AdminPanel from './components/AdminPanel.vue'
+import SimpleChat from './components/SimpleChat.vue'
 import UserHistory from './components/UserHistory.vue'
 import AdminDataImport from './components/admin/AdminDataImport.vue'
 import AdminDataView from './components/admin/AdminDataView.vue'
 import AdminServiceTickets from './components/admin/AdminServiceTickets.vue'
+import AdminUserManagement from './components/admin/AdminUserManagement.vue'
+import { AUTH_EXPIRED_EVENT, authService, getStoredAdmin } from './services/auth'
+import { apiService } from './services/api'
 import { isAdminNavItemActive, isAdminPanelMenu } from './utils/adminNavigation.mjs'
+import { canManageAdminUsers, isAdminRole } from './utils/adminRoles.mjs'
 import { getEntryIdentity } from './utils/entryIdentity.mjs'
 
-const activeMenu = ref('chat')
+const entryIdentity = getEntryIdentity()
+const activeMenu = ref(entryIdentity.isAdminEntry ? 'admin-service-tickets' : 'chat')
 const selectedModel = ref('qwen-turbo')
 const selectedCollection = ref('')
 const availableModels = ref([])
 const apiStatus = ref(false)
 const currentAdmin = ref(getStoredAdmin())
-const isAdmin = computed(() => currentAdmin.value?.role === 'admin')
 const loginDialogVisible = ref(false)
 const loginLoading = ref(false)
 const loginForm = ref({ username: 'admin', password: '' })
-const entryIdentity = getEntryIdentity()
+
+const isAdmin = computed(() => isAdminRole(currentAdmin.value?.admin_role))
+const isSuperAdmin = computed(() => canManageAdminUsers(currentAdmin.value?.admin_role))
 
 const qaNavItems = [
   { key: 'chat', label: '智能问答', icon: 'ChatDotRound' },
@@ -144,26 +185,45 @@ const adminNavItems = [
   { key: 'admin-service-tickets', label: '服务记录/工单', icon: 'Tickets' },
   { key: 'admin-data-import', label: '数据导入', icon: 'UploadFilled' },
   { key: 'admin-data-view', label: '数据查看', icon: 'View' },
-  { key: 'admin-collections', label: '系统设置', icon: 'Setting', panelKeys: ['admin-collections', 'admin-create', 'admin-config'] },
+  {
+    key: 'admin-collections',
+    label: '系统设置',
+    icon: 'Setting',
+    panelKeys: ['admin-collections', 'admin-create', 'admin-config'],
+  },
+  { key: 'admin-users', label: '管理员账号', icon: 'UserFilled', superOnly: true },
 ]
-const visibleAdminNavItems = computed(() => isAdmin.value ? adminNavItems : [])
 
-const adminTabMap = { 'admin-collections': 'collections', 'admin-create': 'create', 'admin-config': 'config' }
+const visibleAdminNavItems = computed(() =>
+  isAdmin.value
+    ? adminNavItems.filter((item) => !item.superOnly || isSuperAdmin.value)
+    : []
+)
+
+const adminTabMap = {
+  'admin-collections': 'collections',
+  'admin-create': 'create',
+  'admin-config': 'config',
+}
+
 const adminTab = computed(() => adminTabMap[activeMenu.value] || 'collections')
 
 const pageMeta = {
-  chat:               { title: '智能问答', sub: '天合人康扶商问答系统' },
-  'user-history':     { title: '对话历史', sub: '查看您的问答记录' },
-  'admin-service-tickets': { title: '服务记录/工单', sub: '查看问答记录、人工处理和召回上下文回修' },
-  'admin-data-import':{ title: '数据导入', sub: '导入文档到知识库' },
-  'admin-data-view':  { title: '数据查看', sub: '查看知识库数据' },
-  'admin-collections':{ title: '系统设置', sub: '知识库配置与管理' },
-  'admin-create':     { title: '创建知识库', sub: '新建向量集合' },
-  'admin-config':     { title: '配置信息', sub: '系统参数' },
+  chat: { title: '智能问答', sub: '天合人康扶商问答系统' },
+  'user-history': { title: '对话历史', sub: '查看您的问答记录' },
+  'admin-service-tickets': { title: '服务记录/工单', sub: '查看问答记录、人工处理和上下文回溯' },
+  'admin-data-import': { title: '数据导入', sub: '导入文档到知识库' },
+  'admin-data-view': { title: '数据查看', sub: '查看知识库数据' },
+  'admin-collections': { title: '系统设置', sub: '知识库配置与管理' },
+  'admin-create': { title: '创建知识库', sub: '新建向量集合' },
+  'admin-config': { title: '配置信息', sub: '系统参数' },
+  'admin-users': { title: '管理员账号', sub: '主管理员分发子管理员账号' },
 }
+
 const pageTitle = computed(() =>
   entryIdentity.isStoreEntry ? '扶商店长助手' : (pageMeta[activeMenu.value]?.title || '')
 )
+
 const pageSubtitle = computed(() =>
   entryIdentity.isStoreEntry
     ? (entryIdentity.kb ? `知识库：${entryIdentity.kb}` : '每日会话')
@@ -179,10 +239,24 @@ const handleMenuSelect = (key) => {
     loginDialogVisible.value = true
     return
   }
+  if (key === 'admin-users' && !isSuperAdmin.value) {
+    ElMessage.warning('仅主管理员可分发子管理员')
+    activeMenu.value = 'chat'
+    return
+  }
   activeMenu.value = key
 }
+
 const isAdminNavItemSelected = (item) => isAdminNavItemActive(item, activeMenu.value)
-const handleResumeSession = () => { activeMenu.value = 'chat' }
+const handleResumeSession = () => {
+  activeMenu.value = entryIdentity.isAdminEntry ? 'admin-service-tickets' : 'chat'
+}
+
+const ensureAdminLanding = () => {
+  if (entryIdentity.isAdminEntry) {
+    activeMenu.value = 'admin-service-tickets'
+  }
+}
 
 const loginAdmin = async () => {
   if (!loginForm.value.username || !loginForm.value.password) {
@@ -194,9 +268,13 @@ const loginAdmin = async () => {
     currentAdmin.value = await authService.login(loginForm.value.username, loginForm.value.password)
     loginDialogVisible.value = false
     loginForm.value.password = ''
+    ensureAdminLanding()
+    if (activeMenu.value === 'admin-users' && !canManageAdminUsers(currentAdmin.value?.admin_role)) {
+      activeMenu.value = 'chat'
+    }
     ElMessage.success('管理员已登录')
-  } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '登录失败')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '登录失败')
   } finally {
     loginLoading.value = false
   }
@@ -205,34 +283,55 @@ const loginAdmin = async () => {
 const logoutAdmin = async () => {
   await authService.logout()
   currentAdmin.value = null
-  if (activeMenu.value.startsWith('admin')) activeMenu.value = 'chat'
+  if (entryIdentity.isAdminEntry) {
+    activeMenu.value = 'admin-service-tickets'
+    loginDialogVisible.value = true
+  } else if (activeMenu.value.startsWith('admin')) {
+    activeMenu.value = 'chat'
+  }
   ElMessage.success('已退出管理员登录')
 }
 
 const handleAuthExpired = () => {
   currentAdmin.value = null
-  if (activeMenu.value.startsWith('admin')) activeMenu.value = 'chat'
+  if (entryIdentity.isAdminEntry) {
+    activeMenu.value = 'admin-service-tickets'
+    loginDialogVisible.value = true
+  } else if (activeMenu.value.startsWith('admin')) {
+    activeMenu.value = 'chat'
+  }
   ElMessage.warning('管理员登录已失效，请重新登录')
 }
 
 onMounted(async () => {
   window.addEventListener('knowledge-session:resume', handleResumeSession)
   window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+
   try {
     const user = await authService.me()
-    if (user) currentAdmin.value = user
+    if (user) {
+      currentAdmin.value = user
+      ensureAdminLanding()
+      if (activeMenu.value === 'admin-users' && !canManageAdminUsers(user.admin_role)) {
+        activeMenu.value = 'chat'
+      }
+    }
   } catch {}
+
+  if (entryIdentity.isAdminEntry && !currentAdmin.value) {
+    loginDialogVisible.value = true
+  }
+
   try {
     const res = await apiService.getModels()
     availableModels.value = res.models
     selectedModel.value = res.default_model
     apiStatus.value = true
   } catch {
-    availableModels.value = [
-      { name: 'doubao-seed-2-0-pro-260215' }
-    ]
+    availableModels.value = [{ name: 'doubao-seed-2-0-pro-260215' }]
   }
 })
+
 onUnmounted(() => {
   window.removeEventListener('knowledge-session:resume', handleResumeSession)
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
@@ -241,36 +340,35 @@ onUnmounted(() => {
 
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d1117; }
+body { background: #f7f4ee; }
 </style>
 
 <style scoped>
-/* ── Aurora background ── */
 .aurora-bg {
   position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
 }
 .blob {
   position: absolute; border-radius: 50%;
-  filter: blur(90px); opacity: 0.28;
+  filter: blur(130px); opacity: 0.12;
   animation: drift 20s ease-in-out infinite alternate;
 }
 .blob-1 {
   width: 650px; height: 650px; top: -220px; left: -120px;
-  background: radial-gradient(circle, #4f8ef7 0%, #7c3aed 50%, transparent 100%);
+  background: radial-gradient(circle, rgba(79, 142, 247, 0.34) 0%, rgba(121, 117, 218, 0.12) 52%, transparent 100%);
   animation-duration: 22s;
 }
 .blob-2 {
   width: 550px; height: 550px; bottom: -180px; right: -120px;
-  background: radial-gradient(circle, #06b6d4 0%, #34d399 50%, transparent 100%);
+  background: radial-gradient(circle, rgba(34, 176, 125, 0.26) 0%, rgba(79, 142, 247, 0.1) 52%, transparent 100%);
   animation-duration: 18s; animation-delay: -8s;
 }
 .blob-3 {
   width: 480px; height: 480px; top: 35%; left: 45%;
-  background: radial-gradient(circle, #a78bfa 0%, #f472b6 50%, transparent 100%);
-  animation-duration: 25s; animation-delay: -14s; opacity: 0.22;
+  background: radial-gradient(circle, rgba(234, 181, 69, 0.18) 0%, rgba(121, 117, 218, 0.08) 55%, transparent 100%);
+  animation-duration: 25s; animation-delay: -14s; opacity: 0.1;
 }
 .noise {
-  position: absolute; inset: 0; opacity: 0.025;
+  position: absolute; inset: 0; opacity: 0.006;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
   background-size: 200px 200px;
 }
@@ -281,32 +379,31 @@ body { background: #0d1117; }
   100% { transform: translate(30px, 20px) scale(1.03); }
 }
 
-/* ── Layout ── */
 #app { height: 100vh; height: 100dvh; overflow: hidden; }
 .app-layout {
   position: relative; z-index: 1;
   display: flex; height: 100vh; height: 100dvh; overflow: hidden;
 }
 
-/* ── Sidebar ── */
 .sidebar {
   width: 60px; flex-shrink: 0;
   display: flex; flex-direction: column; align-items: center;
-  background: rgba(13,17,23,0.75);
-  backdrop-filter: blur(28px);
-  border-right: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.86);
+  backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(191, 208, 224, 0.65);
   padding: 0;
+  box-shadow: 12px 0 30px rgba(31, 45, 61, 0.04);
 }
 .sidebar-logo {
   height: 60px; display: flex; align-items: center; justify-content: center;
-  width: 100%; border-bottom: 1px solid rgba(255,255,255,0.05);
+  width: 100%; border-bottom: 1px solid rgba(191, 208, 224, 0.45);
 }
 .logo-mark {
   width: 34px; height: 34px; border-radius: 10px;
-  background: linear-gradient(135deg, #3b6fd4, #5b4fcf);
+  background: linear-gradient(135deg, #4f8ef7, #7a75da);
   display: flex; align-items: center; justify-content: center;
   font-size: 16px; color: #fff;
-  box-shadow: 0 4px 14px rgba(59,111,212,0.5);
+  box-shadow: 0 10px 24px rgba(79, 142, 247, 0.28);
 }
 .nav-list {
   flex: 1; display: flex; flex-direction: column;
@@ -314,7 +411,7 @@ body { background: #0d1117; }
   overflow-y: auto;
 }
 .nav-section-title {
-  font-size: 10px; color: rgba(255,255,255,0.18);
+  font-size: 10px; color: #7f92a5; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.8px;
   padding: 8px 0 4px; width: 100%; text-align: center;
 }
@@ -322,73 +419,72 @@ body { background: #0d1117; }
   position: relative;
   width: 40px; height: 40px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
-  cursor: pointer; color: rgba(255,255,255,0.3); font-size: 17px;
+  cursor: pointer; color: #738596; font-size: 17px;
   background: transparent; border: none; outline: none;
   transition: all 0.2s cubic-bezier(0.4,0,0.2,1);
 }
-.nav-item:hover { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.7); }
+.nav-item:hover { background: #f0f5fa; color: #5a6d80; }
 .nav-item.active {
-  background: rgba(79,142,247,0.15);
-  color: #7eb3ff;
-  box-shadow: 0 0 0 1px rgba(79,142,247,0.3);
+  background: #edf5ff;
+  color: #4f8ef7;
+  box-shadow: 0 0 0 1px rgba(79,142,247,0.2);
 }
 .nav-active-dot {
   position: absolute; right: -1px; top: 50%; transform: translateY(-50%);
   width: 3px; height: 16px; border-radius: 99px;
-  background: linear-gradient(180deg, #7eb3ff, #a78bfa);
-  box-shadow: 0 0 8px rgba(79,142,247,0.8);
+  background: linear-gradient(180deg, #4f8ef7, #7a75da);
+  box-shadow: 0 0 8px rgba(79,142,247,0.35);
 }
 .sidebar-bottom {
-  padding: 12px 0; border-top: 1px solid rgba(255,255,255,0.05);
+  padding: 12px 0; border-top: 1px solid rgba(191, 208, 224, 0.45);
   width: 100%; display: flex; justify-content: center;
 }
 
-/* ── Main wrap ── */
 .main-wrap {
   flex: 1; display: flex; flex-direction: column; overflow: hidden;
 }
 
-/* ── Topbar ── */
 .topbar {
   height: 60px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 28px;
-  background: rgba(13,17,23,0.65);
-  backdrop-filter: blur(28px);
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.82);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(191, 208, 224, 0.65);
 }
 .topbar-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.page-title { font-size: 15px; font-weight: 700; color: #f0f4ff; letter-spacing: -0.2px; }
-.page-subtitle { font-size: 12px; color: rgba(255,255,255,0.25); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-title { font-size: 15px; font-weight: 700; color: #526679; letter-spacing: -0.2px; }
+.page-subtitle { font-size: 12px; color: #98a5b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
 .model-select-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .model-select-wrap :deep(.el-select) { max-width: 100%; }
-.model-icon { color: rgba(255,255,255,0.3); font-size: 14px; }
+.model-icon { color: #98a5b2; font-size: 14px; }
 .admin-session { display: flex; align-items: center; gap: 8px; }
 
 .status-pill {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 10px; border-radius: 99px;
   font-size: 11px; font-weight: 500; letter-spacing: 0.3px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.04);
-  color: rgba(255,255,255,0.4);
+  border: 1px solid rgba(34, 176, 125, 0.18);
+  background: rgba(255,255,255,0.82);
+  color: #5c7283;
   max-width: 100%;
+  box-shadow: 0 8px 20px rgba(31, 45, 61, 0.05);
 }
-.status-pill.online { color: #2dd4a0; border-color: rgba(45,212,160,0.25); background: rgba(45,212,160,0.06); }
+.status-pill.online { color: #22b07d; border-color: rgba(34,176,125,0.2); background: rgba(233,248,242,0.92); }
 .pulse-dot {
   width: 6px; height: 6px; border-radius: 50%;
-  background: rgba(255,255,255,0.3);
+  background: rgba(92,114,131,0.35);
 }
 .status-pill.online .pulse-dot {
-  background: #2dd4a0;
-  box-shadow: 0 0 0 0 rgba(45,212,160,0.4);
+  background: #22b07d;
+  box-shadow: 0 0 0 0 rgba(34,176,125,0.32);
   animation: pulse 2s infinite;
 }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(45,212,160,0.4); }
-  70%  { box-shadow: 0 0 0 6px rgba(45,212,160,0); }
-  100% { box-shadow: 0 0 0 0 rgba(45,212,160,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(34,176,125,0.32); }
+  70%  { box-shadow: 0 0 0 6px rgba(34,176,125,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,176,125,0); }
 }
 
 .entry-pill {
@@ -398,9 +494,9 @@ body { background: #0d1117; }
   white-space: nowrap;
   padding: 5px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(45,212,160,0.25);
-  background: rgba(45,212,160,0.08);
-  color: #8ee7c8;
+  border: 1px solid rgba(34,176,125,0.18);
+  background: rgba(233,248,242,0.9);
+  color: #1f8c65;
   font-size: 12px;
   font-weight: 600;
 }
@@ -418,13 +514,13 @@ body { background: #0d1117; }
   padding: 14px;
 }
 
-/* ── Content ── */
 .content {
   flex: 1; overflow-y: auto; padding: 28px 32px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.1), rgba(255,255,255,0.03));
 }
 .content > div { min-width: 0; }
 .content::-webkit-scrollbar { width: 4px; }
-.content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 99px; }
+.content::-webkit-scrollbar-thumb { background: rgba(191,208,224,0.9); border-radius: 99px; }
 
 @media (max-width: 900px) {
   .topbar {
@@ -476,7 +572,7 @@ body { background: #0d1117; }
     flex-direction: row;
     justify-content: center;
     border-right: none;
-    border-top: 1px solid rgba(255,255,255,0.08);
+    border-top: 1px solid rgba(191, 208, 224, 0.65);
     padding: 0 max(10px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(10px, env(safe-area-inset-left));
   }
 

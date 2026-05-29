@@ -3,9 +3,12 @@ import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
-import './styles/dark-theme.css'
+import './styles/light-theme.css'
+import { bootstrapEntryIdentity } from './utils/entryIdentity.mjs'
 
 const app = createApp(App)
+
+bootstrapEntryIdentity()
 
 // Register Element Plus
 app.use(ElementPlus)

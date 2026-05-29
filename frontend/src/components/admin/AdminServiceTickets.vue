@@ -54,9 +54,29 @@
         <el-icon><Refresh /></el-icon>
         刷新
       </el-button>
+      <el-button
+        type="danger"
+        size="small"
+        plain
+        :disabled="!selectedCount || batchDeleting"
+        :loading="batchDeleting"
+        @click="confirmDeleteSelectedTickets"
+      >
+        <el-icon><Delete /></el-icon>
+        批量删除<span v-if="selectedCount">（{{ selectedCount }}）</span>
+      </el-button>
     </div>
 
-    <el-table :data="items" v-loading="loading" stripe class="ticket-table" @row-click="openDetail">
+    <el-table
+      ref="tableRef"
+      :data="items"
+      v-loading="loading"
+      stripe
+      class="ticket-table"
+      @row-click="handleRowClick"
+      @selection-change="handleSelectionChange"
+    >
+      <el-table-column type="selection" width="52" align="center" />
       <el-table-column label="状态" width="110">
         <template #default="{ row }">
           <el-tag :type="statusMeta(row.status).type" size="small">{{ statusMeta(row.status).label }}</el-tag>
@@ -65,7 +85,10 @@
       <el-table-column label="店长 / 用户" width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <div class="user-cell">{{ row.user_name || row.user_id || 'guest' }}</div>
-          <div class="muted mini">{{ row.channel || 'web' }}</div>
+          <div v-if="row.entry_user_name || row.entry_user_id" class="muted mini">
+            {{ row.entry_user_name || row.entry_user_id }}
+          </div>
+          <div class="muted mini">{{ row.channel || 'web' }}<template v-if="row.entry_source"> · {{ row.entry_source }}</template></div>
         </template>
       </el-table-column>
       <el-table-column label="问题" min-width="230" show-overflow-tooltip>
@@ -149,6 +172,28 @@
         <section class="detail-section">
           <div class="section-title">问题</div>
           <div class="text-block">{{ detail.query }}</div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">入口身份</div>
+          <div class="clarification-grid">
+            <div>
+              <span class="muted mini">工单用户</span>
+              <strong>{{ detail.user_name || detail.user_id || 'guest' }}</strong>
+            </div>
+            <div>
+              <span class="muted mini">入口用户 ID</span>
+              <strong>{{ detail.entry_user_id || '—' }}</strong>
+            </div>
+            <div>
+              <span class="muted mini">入口用户名称</span>
+              <strong>{{ detail.entry_user_name || '—' }}</strong>
+            </div>
+            <div>
+              <span class="muted mini">入口来源</span>
+              <strong>{{ detail.entry_source || detail.channel || 'web' }}</strong>
+            </div>
+          </div>
         </section>
 
         <section v-if="chatHistory.length" class="detail-section">
@@ -343,7 +388,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Close, Delete, EditPen, Refresh, RefreshRight, Search } from '@element-plus/icons-vue'
 import { apiService } from '../../services/api'
@@ -351,6 +396,7 @@ import { apiService } from '../../services/api'
 const statusOptions = [
   { value: 'clarifying', label: '澄清中', type: 'warning' },
   { value: 'resolved_ai', label: 'AI 已解决', type: 'success' },
+  { value: 'unanswered_normal', label: '常规未命中', type: 'info' },
   { value: 'pending_manual', label: '待人工', type: 'danger' },
   { value: 'in_progress', label: '处理中', type: 'warning' },
   { value: 'resolved_manual', label: '人工已解决', type: 'success' },
@@ -374,6 +420,7 @@ const detail = ref(null)
 const detailLoading = ref(false)
 const ticketSaving = ref(false)
 const deletingTicketId = ref('')
+const batchDeleting = ref(false)
 const savingChunkId = ref('')
 const revectorizing = ref(false)
 const vectorizeResult = ref(null)
@@ -382,14 +429,18 @@ const editForm = ref({ status: '', answer: '', note: '' })
 const imageUrlMap = ref({})
 const queryImageUrlMap = ref({})
 const imagePreview = ref({ visible: false, url: '', title: '图片预览' })
+const tableRef = ref(null)
+const selectedTickets = ref([])
 
 const statCards = computed(() => [
   { key: 'all', label: '全部', value: stats.value.total || 0, status: '' },
   { key: 'pending_manual', label: '待人工', value: stats.value.by_status?.pending_manual || 0, status: 'pending_manual' },
+  { key: 'unanswered_normal', label: '常规未命中', value: stats.value.by_status?.unanswered_normal || 0, status: 'unanswered_normal' },
   { key: 'resolved_ai', label: 'AI 已解决', value: stats.value.by_status?.resolved_ai || 0, status: 'resolved_ai' },
   { key: 'resolved_manual', label: '人工已解决', value: stats.value.by_status?.resolved_manual || 0, status: 'resolved_manual' },
   { key: 'clarifying', label: '澄清中', value: stats.value.by_status?.clarifying || 0, status: 'clarifying' },
 ])
+const selectedCount = computed(() => selectedTickets.value.length)
 
 const hasVectorizableContext = computed(() =>
   Boolean(detail.value?.contexts?.some(ctx => ctx.job_id))
@@ -530,6 +581,9 @@ const loadData = async () => {
     if (listRes.success) {
       items.value = listRes.data.items || []
       total.value = listRes.data.total || 0
+      await nextTick()
+      tableRef.value?.clearSelection?.()
+      selectedTickets.value = []
     }
   } catch (e) {
     ElMessage.error('加载服务记录失败: ' + (e.response?.data?.detail || e.message))
@@ -546,6 +600,15 @@ const reloadFirstPage = () => {
 const selectStatus = (status) => {
   filters.value.status = status
   reloadFirstPage()
+}
+
+const handleSelectionChange = (rows) => {
+  selectedTickets.value = (rows || []).filter(ticket => ticket?.id)
+}
+
+const handleRowClick = (row, column) => {
+  if (column?.type === 'selection') return
+  openDetail(row)
 }
 
 const openDetail = async (row) => {
@@ -633,6 +696,69 @@ const confirmDeleteTicket = async (ticket) => {
   }
 }
 
+const confirmDeleteSelectedTickets = async () => {
+  if (!selectedTickets.value.length || batchDeleting.value) return
+
+  const ticketsToDelete = [...selectedTickets.value]
+  const count = ticketsToDelete.length
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${count} 条工单吗？删除后相关工单及召回上下文记录将不可恢复。`,
+      '批量删除工单',
+      {
+        confirmButtonText: '批量删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+
+  batchDeleting.value = true
+
+  const failedTickets = []
+  let successCount = 0
+
+  try {
+    for (const ticket of ticketsToDelete) {
+      try {
+        const res = await apiService.deleteServiceTicket(ticket.id)
+        if (res.success) {
+          successCount += 1
+        } else {
+          failedTickets.push(ticket)
+        }
+      } catch {
+        failedTickets.push(ticket)
+      }
+    }
+
+    if (successCount > 0) {
+      ElMessage.success(`已删除 ${successCount} 条工单`)
+    }
+
+    if (failedTickets.length > 0) {
+      ElMessage.error(`有 ${failedTickets.length} 条工单删除失败，请稍后重试`)
+    }
+
+    if (detail.value && ticketsToDelete.some(ticket => ticket.id === detail.value.id)) {
+      detailVisible.value = false
+      detail.value = null
+    }
+
+    if (successCount >= items.value.length && page.value > 1) {
+      page.value -= 1
+    }
+
+    await loadData()
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 const saveChunk = async (ctx) => {
   if (!detail.value || !ctx.chunk_id) return
   const content = contextEdits.value[ctx.chunk_id] || ''
@@ -714,23 +840,24 @@ onMounted(loadData)
   min-height: 74px;
   padding: 14px;
   border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.035);
-  color: #e2e8f0;
+  border: 1px solid #dce5ee;
+  background: rgba(255,255,255,0.94);
+  color: #213041;
+  box-shadow: 0 16px 36px rgba(31, 45, 61, 0.06);
   cursor: pointer;
   text-align: left;
 }
 
 .ticket-stat:hover,
 .ticket-stat.active {
-  border-color: rgba(126,179,255,0.55);
-  background: rgba(79,142,247,0.1);
+  border-color: rgba(79,142,247,0.34);
+  background: #f3f8ff;
 }
 
-.ticket-stat.warn .stat-value { color: #f6ad55; }
-.ticket-stat.ok .stat-value { color: #2dd4a0; }
+.ticket-stat.warn .stat-value { color: #d69a1d; }
+.ticket-stat.ok .stat-value { color: #22b07d; }
 .stat-value { font-size: 24px; font-weight: 800; line-height: 1; }
-.stat-label { font-size: 12px; color: rgba(255,255,255,0.48); }
+.stat-label { font-size: 12px; color: #98a6b3; }
 
 .ticket-filters {
   display: flex;
@@ -740,7 +867,7 @@ onMounted(loadData)
 }
 
 .ticket-table {
-  --el-table-border-color: rgba(255,255,255,0.08);
+  --el-table-border-color: #e1e8ef;
   border-radius: 8px;
   overflow: hidden;
 }
@@ -748,11 +875,11 @@ onMounted(loadData)
 .user-cell,
 .query-text,
 .answer-text {
-  color: #e2e8f0;
+  color: #213041;
 }
 
 .muted {
-  color: rgba(255,255,255,0.42);
+  color: #98a6b3;
 }
 
 .mini {
@@ -787,7 +914,7 @@ onMounted(loadData)
 }
 
 .detail-title {
-  color: #f8fafc;
+  color: #526679;
   font-size: 18px;
   font-weight: 800;
 }
@@ -797,7 +924,7 @@ onMounted(loadData)
   flex-direction: column;
   gap: 10px;
   padding-top: 14px;
-  border-top: 1px solid rgba(255,255,255,0.08);
+  border-top: 1px solid #e8eef4;
 }
 
 .section-title {
@@ -805,7 +932,7 @@ onMounted(loadData)
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  color: #f8fafc;
+  color: #526679;
   font-size: 14px;
   font-weight: 700;
 }
@@ -818,9 +945,9 @@ onMounted(loadData)
   white-space: pre-wrap;
   padding: 12px;
   border-radius: 8px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #e2e8f0;
+  background: #f7fafc;
+  border: 1px solid #e2eaf2;
+  color: #213041;
   line-height: 1.7;
 }
 
@@ -835,10 +962,10 @@ onMounted(loadData)
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid #e2eaf2;
   border-left-width: 2px;
   border-radius: 8px;
-  background: rgba(255,255,255,0.025);
+  background: rgba(255,255,255,0.9);
 }
 
 .chat-history-item.from-user {
@@ -857,7 +984,7 @@ onMounted(loadData)
 }
 
 .chat-role {
-  color: #f8fafc;
+  color: #526679;
   font-size: 12px;
   font-weight: 800;
 }
@@ -866,8 +993,8 @@ onMounted(loadData)
   padding: 2px 6px;
   border-radius: 999px;
   border: 0;
-  background: rgba(126,179,255,0.12);
-  color: #bfdbfe;
+  background: #eaf3ff;
+  color: #4f8ef7;
   font-size: 11px;
 }
 
@@ -896,10 +1023,10 @@ onMounted(loadData)
   height: 72px;
   padding: 0;
   overflow: hidden;
-  border: 1px solid rgba(126,179,255,0.28);
+  border: 1px solid rgba(79,142,247,0.2);
   border-radius: 8px;
-  background: rgba(255,255,255,0.04);
-  color: rgba(255,255,255,0.62);
+  background: #f9fbfd;
+  color: #98a6b3;
   cursor: pointer;
 }
 
@@ -942,7 +1069,7 @@ onMounted(loadData)
 .chat-history-content {
   white-space: pre-wrap;
   word-break: break-word;
-  color: #e2e8f0;
+  color: #213041;
   font-size: 13px;
   line-height: 1.65;
 }
@@ -956,8 +1083,8 @@ onMounted(loadData)
 .chat-source-list span {
   padding: 2px 6px;
   border-radius: 6px;
-  background: rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.56);
+  background: #eff4f8;
+  color: #5d6f80;
   font-size: 11px;
 }
 
@@ -974,21 +1101,21 @@ onMounted(loadData)
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid #e2eaf2;
   border-radius: 8px;
-  background: rgba(255,255,255,0.025);
+  background: rgba(255,255,255,0.92);
 }
 
 .context-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  color: rgba(255,255,255,0.48);
+  color: #98a6b3;
   font-size: 12px;
 }
 
 .context-subtitle {
-  color: rgba(255,255,255,0.64);
+  color: #617486;
   font-size: 12px;
   font-weight: 700;
 }
@@ -998,14 +1125,14 @@ onMounted(loadData)
   flex-direction: column;
   gap: 6px;
   padding-left: 10px;
-  border-left: 2px solid rgba(45,212,160,0.35);
+  border-left: 2px solid rgba(34,176,125,0.28);
 }
 
 .parent-context-body {
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
-  color: rgba(255,255,255,0.72);
+  color: #7a8b9b;
   font-size: 12px;
   line-height: 1.7;
 }
@@ -1013,9 +1140,9 @@ onMounted(loadData)
 .vectorize-result {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(45,212,160,0.08);
-  border: 1px solid rgba(45,212,160,0.2);
-  color: #8ee7c8;
+  background: #eef9f4;
+  border: 1px solid rgba(34,176,125,0.18);
+  color: #1f8c65;
   font-size: 12px;
   line-height: 1.7;
 }
@@ -1032,14 +1159,14 @@ onMounted(loadData)
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid #e2eaf2;
   border-radius: 8px;
-  background: rgba(255,255,255,0.03);
+  background: #fbfcfe;
 }
 
 .clarification-grid strong,
 .collected-row strong {
-  color: #e2e8f0;
+  color: #213041;
   font-size: 13px;
   word-break: break-word;
 }
@@ -1062,13 +1189,13 @@ onMounted(loadData)
   align-items: flex-start;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255,255,255,0.025);
-  color: rgba(255,255,255,0.62);
+  background: #f7fafc;
+  color: #617486;
 }
 
 .turn-round {
   flex: 0 0 auto;
-  color: #8ee7c8;
+  color: #1f8c65;
   font-size: 12px;
   font-weight: 700;
 }

@@ -140,6 +140,8 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
         ) as process_ticket, patch(
             "app.services.knowledge_service._persist_conversation_messages"
         ) as persist, patch(
+            "app.services.knowledge_service.record_unanswered_normal_ticket"
+        ) as record_unanswered, patch(
             "app.services.knowledge_service.record_ai_resolved_ticket"
         ) as record_ticket:
             chunks = [
@@ -157,10 +159,10 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
                     requester_name="Manager",
                 )
             ]
-        return chunks, classify, process_ticket, persist, record_ticket
+        return chunks, classify, process_ticket, persist, record_unanswered, record_ticket
 
     async def test_stream_conversion_disabled_by_default_keeps_normal_done_and_persists(self):
-        chunks, classify, process_ticket, persist, record_ticket = await self._collect_stream(convert=False)
+        chunks, classify, process_ticket, persist, record_unanswered, record_ticket = await self._collect_stream(convert=False)
         done_payload = _event_payload(chunks[-1])
 
         self.assertEqual(done_payload["answer"], "normal streamed answer")
@@ -168,11 +170,12 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
         classify.assert_not_called()
         process_ticket.assert_not_called()
         persist.assert_called_once()
+        record_unanswered.assert_not_called()
         record_ticket.assert_called_once()
         self.assertEqual(record_ticket.call_args.kwargs["status"], "resolved_ai")
 
     async def test_stream_conversion_enabled_converts_done_event_and_skips_persist(self):
-        chunks, classify, process_ticket, persist, record_ticket = await self._collect_stream(convert=True)
+        chunks, classify, process_ticket, persist, record_unanswered, record_ticket = await self._collect_stream(convert=True)
         done_payload = _event_payload(chunks[-1])
 
         self.assertEqual(done_payload["answer"], "Please clarify impact")
@@ -181,10 +184,11 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
         classify.assert_called_once()
         process_ticket.assert_called_once()
         persist.assert_not_called()
+        record_unanswered.assert_not_called()
         record_ticket.assert_not_called()
 
     async def test_stream_conversion_error_falls_back_to_normal_done_and_persists(self):
-        chunks, _classify, _process_ticket, persist, record_ticket = await self._collect_stream(
+        chunks, _classify, _process_ticket, persist, record_unanswered, record_ticket = await self._collect_stream(
             convert=True,
             process_side_effect=RuntimeError("ticket write failed"),
         )
@@ -193,6 +197,205 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done_payload["answer"], "No relevant knowledge found")
         self.assertEqual(done_payload["finish_reason"], "stop")
         persist.assert_called_once()
+        record_unanswered.assert_not_called()
+        record_ticket.assert_not_called()
+
+    async def test_stream_conversion_enabled_keeps_normal_done_and_records_unanswered_when_classifier_allows_rag(self):
+        classifier = {
+            "intent_class": "D",
+            "needs_ticket_flow": False,
+            "fields": {},
+            "missing_fields": [],
+            "question": "",
+        }
+
+        chunks, classify, process_ticket, persist, record_unanswered, record_ticket = await self._collect_stream(
+            convert=True,
+            classifier=classifier,
+        )
+        done_payload = _event_payload(chunks[-1])
+
+        self.assertEqual(done_payload["answer"], "No relevant knowledge found")
+        self.assertEqual(done_payload["finish_reason"], "stop")
+        classify.assert_called_once()
+        process_ticket.assert_not_called()
+        persist.assert_called_once()
+        record_unanswered.assert_called_once()
+        record_ticket.assert_not_called()
+
+    async def test_stream_conversion_enabled_passes_all_query_images_into_ticket_clarification(self):
+        final_values = {
+            "answer": "No relevant knowledge found",
+            "confidence": 0.2,
+            "sources": [],
+            "query_intent": "qa",
+            "query_complexity": "simple",
+            "query_keywords": [],
+            "metrics": types.SimpleNamespace(total_chunks_retrieved=1, chunks_after_rerank=1),
+            "used_fallback": True,
+            "fallback_reason": "no_relevant_documents",
+            "quality_passed": False,
+            "answer_quality": "low",
+            "image_map": {},
+        }
+        ctx = {
+            "reranked_chunks": [],
+            "messages": [],
+            "model_name": "doubao-seed-2-0-pro-260215",
+            "image_map": {},
+            "is_image_mode": False,
+            "is_multimodal_kb": False,
+        }
+        classifier = {
+            "intent_class": "B",
+            "needs_ticket_flow": True,
+            "fields": {"issue_detail": "new gap"},
+            "missing_fields": ["impact"],
+            "question": "Please clarify impact",
+        }
+        ticket = {
+            "answer": "Please clarify impact",
+            "confidence": 0.0,
+            "finish_reason": "clarification",
+            "clarification": {"intent_class": "B"},
+        }
+
+        with patch("agents.knowledge.get_knowledge_stream_prep_agent", return_value=FakeStreamAgent(final_values)), patch(
+            "agents.knowledge.create_initial_state",
+            return_value={"query": "new gap"},
+        ), patch(
+            "agents.knowledge.nodes.generate.prepare_generation_context",
+            return_value=ctx,
+        ), patch(
+            "agents.knowledge.nodes.generate.build_sources_from_reranked",
+            return_value=[],
+        ), patch(
+            "agents.knowledge.openai_stream.iter_openai_text_deltas",
+            side_effect=lambda messages, model_name: _one_delta(messages, model_name),
+        ), patch(
+            "app.services.knowledge_service.classify_ticket_intent_with_llm",
+            return_value=classifier,
+        ), patch(
+            "app.services.knowledge_service.process_ticket_clarification_turn",
+            return_value=ticket,
+        ) as process_ticket, patch(
+            "app.services.knowledge_service._persist_conversation_messages"
+        ) as persist, patch(
+            "app.services.knowledge_service.record_unanswered_normal_ticket"
+        ) as record_unanswered, patch(
+            "app.services.knowledge_service.record_ai_resolved_ticket"
+        ) as record_ticket:
+            chunks = [
+                chunk
+                async for chunk in stream_knowledge_qa_sse(
+                    query="new gap",
+                    model_name="doubao-seed-2-0-pro-260215",
+                    session_id="session-1",
+                    collection="kb",
+                    query_image_url="https://example.com/a.jpg",
+                    query_image_oss_key="query_images/a.jpg",
+                    query_image_oss_keys=["query_images/a.jpg", "query_images/b.jpg"],
+                    convert_missing_knowledge_to_ticket=True,
+                    user_id="store-1",
+                    user_name="Store",
+                    channel="h5",
+                    sender_id="sender-1",
+                    requester_name="Manager",
+                )
+            ]
+
+        done_payload = _event_payload(chunks[-1])
+        self.assertEqual(done_payload["finish_reason"], "clarification")
+        self.assertEqual(
+            process_ticket.call_args.kwargs["query_image_oss_keys"],
+            ["query_images/a.jpg", "query_images/b.jpg"],
+        )
+        persist.assert_not_called()
+        record_unanswered.assert_not_called()
+        record_ticket.assert_not_called()
+
+    async def test_stream_conversion_enabled_passes_all_query_images_into_unanswered_normal_record(self):
+        final_values = {
+            "answer": "No relevant knowledge found",
+            "confidence": 0.2,
+            "sources": [],
+            "query_intent": "qa",
+            "query_complexity": "simple",
+            "query_keywords": [],
+            "metrics": types.SimpleNamespace(total_chunks_retrieved=1, chunks_after_rerank=1),
+            "used_fallback": True,
+            "fallback_reason": "no_relevant_documents",
+            "quality_passed": False,
+            "answer_quality": "low",
+            "image_map": {},
+        }
+        ctx = {
+            "reranked_chunks": [],
+            "messages": [],
+            "model_name": "doubao-seed-2-0-pro-260215",
+            "image_map": {},
+            "is_image_mode": False,
+            "is_multimodal_kb": False,
+        }
+        classifier = {
+            "intent_class": "D",
+            "needs_ticket_flow": False,
+            "fields": {},
+            "missing_fields": [],
+            "question": "",
+        }
+
+        with patch("agents.knowledge.get_knowledge_stream_prep_agent", return_value=FakeStreamAgent(final_values)), patch(
+            "agents.knowledge.create_initial_state",
+            return_value={"query": "new gap"},
+        ), patch(
+            "agents.knowledge.nodes.generate.prepare_generation_context",
+            return_value=ctx,
+        ), patch(
+            "agents.knowledge.nodes.generate.build_sources_from_reranked",
+            return_value=[],
+        ), patch(
+            "agents.knowledge.openai_stream.iter_openai_text_deltas",
+            side_effect=lambda messages, model_name: _one_delta(messages, model_name),
+        ), patch(
+            "app.services.knowledge_service.classify_ticket_intent_with_llm",
+            return_value=classifier,
+        ), patch(
+            "app.services.knowledge_service.process_ticket_clarification_turn"
+        ) as process_ticket, patch(
+            "app.services.knowledge_service._persist_conversation_messages"
+        ) as persist, patch(
+            "app.services.knowledge_service.record_unanswered_normal_ticket"
+        ) as record_unanswered, patch(
+            "app.services.knowledge_service.record_ai_resolved_ticket"
+        ) as record_ticket:
+            chunks = [
+                chunk
+                async for chunk in stream_knowledge_qa_sse(
+                    query="new gap",
+                    model_name="doubao-seed-2-0-pro-260215",
+                    session_id="session-1",
+                    collection="kb",
+                    query_image_url="https://example.com/a.jpg",
+                    query_image_oss_key="query_images/a.jpg",
+                    query_image_oss_keys=["query_images/a.jpg", "query_images/b.jpg"],
+                    convert_missing_knowledge_to_ticket=True,
+                    user_id="store-1",
+                    user_name="Store",
+                    channel="h5",
+                    sender_id="sender-1",
+                    requester_name="Manager",
+                )
+            ]
+
+        done_payload = _event_payload(chunks[-1])
+        self.assertEqual(done_payload["finish_reason"], "stop")
+        process_ticket.assert_not_called()
+        persist.assert_called_once()
+        self.assertEqual(
+            record_unanswered.call_args.kwargs["query_image_oss_keys"],
+            ["query_images/a.jpg", "query_images/b.jpg"],
+        )
         record_ticket.assert_not_called()
 
     async def test_stream_pre_rag_classifier_task_converts_before_generation(self):
@@ -311,6 +514,34 @@ class KnowledgeStreamTicketFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(captured["convert_missing_knowledge_to_ticket"])
         self.assertEqual(captured["user_id"], "store-1")
         self.assertEqual(captured["channel"], "web")
+
+    async def test_stream_api_forwards_all_query_image_oss_keys_to_stream_service(self):
+        captured = {}
+
+        async def fake_stream(**kwargs):
+            captured.update(kwargs)
+            yield "event: done\ndata: {}\n\n"
+
+        with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-1"), patch(
+            "app.api.v1.knowledge._upload_query_images",
+            return_value=(["https://example.com/a.jpg", "https://example.com/b.jpg"], ["query_images/a.jpg", "query_images/b.jpg"]),
+        ), patch(
+            "app.api.v1.knowledge.stream_knowledge_qa_sse",
+            side_effect=fake_stream,
+        ), patch(
+            "app.api.v1.knowledge.classify_ticket_intent_with_llm",
+            return_value={"intent_class": "D", "needs_ticket_flow": False, "fields": {}, "missing_fields": []},
+        ):
+            response = await knowledge.knowledge_qa_stream(
+                KnowledgeRequest(query="new gap", session_id="session-1", collection="kb"),
+                user_id="store-1",
+            )
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+
+        self.assertEqual(chunks, ["event: done\ndata: {}\n\n"])
+        self.assertEqual(captured["query_image_oss_keys"], ["query_images/a.jpg", "query_images/b.jpg"])
 
     async def test_stream_api_pre_rag_c_intent_returns_ticket_done(self):
         ticket = {

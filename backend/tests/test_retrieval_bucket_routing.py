@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import types
@@ -71,6 +72,16 @@ class _FakeMultimodalEmbeddingService:
         return [0.2] * min(dimension, 4)
 
 
+class _FakeBucketRouterLLM:
+    def __init__(self, mapping=None):
+        self.mapping = mapping or {}
+
+    def responses_text(self, messages, **kwargs):
+        query = messages[-1]["content"]
+        bucket = self.mapping.get(query, "none")
+        return json.dumps({"bucket": bucket, "reason": "test"}, ensure_ascii=False)
+
+
 class RetrievalBucketHeuristicTests(unittest.TestCase):
     def test_infer_retrieval_bucket_prefers_excel_and_qa_names_as_faq(self):
         self.assertEqual(infer_retrieval_bucket("tickets.xlsx"), "faq")
@@ -81,10 +92,29 @@ class RetrievalBucketHeuristicTests(unittest.TestCase):
         self.assertEqual(infer_retrieval_bucket("开店手册.pdf"), "manual")
         self.assertEqual(infer_retrieval_bucket("培训教程.docx"), "manual")
 
-    def test_preferred_retrieval_bucket_distinguishes_symptom_and_procedural_queries(self):
+    @patch("app.services.retrieval_bucket.get_llm_service")
+    def test_preferred_retrieval_bucket_distinguishes_symptom_and_procedural_queries(self, mock_get_llm):
+        mock_get_llm.return_value = _FakeBucketRouterLLM(
+            {
+                "店长端无法打开": "faq",
+                "开通微信子商户号需要准备哪些资料？": "manual",
+                "收银": "none",
+            }
+        )
         self.assertEqual(preferred_retrieval_bucket("店长端无法打开"), "faq")
         self.assertEqual(preferred_retrieval_bucket("开通微信子商户号需要准备哪些资料？"), "manual")
         self.assertIsNone(preferred_retrieval_bucket("收银"))
+
+    @patch("app.services.retrieval_bucket.get_llm_service")
+    def test_preferred_retrieval_bucket_keeps_symptom_questions_in_faq_even_with_banfa_wording(self, mock_get_llm):
+        mock_get_llm.return_value = _FakeBucketRouterLLM(
+            {
+                "顾客能进直播，但是直播画面显示没有画面怎么办？": "faq",
+                "顾客在人康课堂已经提现但没有到微信怎么办？": "faq",
+            }
+        )
+        self.assertEqual(preferred_retrieval_bucket("顾客能进直播，但是直播画面显示没有画面怎么办？"), "faq")
+        self.assertEqual(preferred_retrieval_bucket("顾客在人康课堂已经提现但没有到微信怎么办？"), "faq")
 
     def test_resolve_chunking_strategy_uses_smart_mix(self):
         self.assertEqual(
@@ -146,6 +176,10 @@ class MultimodalRetrievalBucketRoutingTests(unittest.TestCase):
                 "app.services.multimodal_embedding_service.get_multimodal_embedding_service",
                 return_value=_FakeMultimodalEmbeddingService(),
             ),
+            patch(
+                "app.services.retrieval_bucket.get_llm_service",
+                return_value=_FakeBucketRouterLLM({"开通微信子商户号需要准备哪些资料？": "manual"}),
+            ),
         ):
             result = asyncio.run(multimodal_retrieve(self._make_state("开通微信子商户号需要准备哪些资料？")))
 
@@ -180,6 +214,10 @@ class MultimodalRetrievalBucketRoutingTests(unittest.TestCase):
                 "app.services.multimodal_embedding_service.get_multimodal_embedding_service",
                 return_value=_FakeMultimodalEmbeddingService(),
             ),
+            patch(
+                "app.services.retrieval_bucket.get_llm_service",
+                return_value=_FakeBucketRouterLLM({"店长端无法打开": "faq"}),
+            ),
         ):
             result = asyncio.run(multimodal_retrieve(self._make_state("店长端无法打开")))
 
@@ -190,6 +228,119 @@ class MultimodalRetrievalBucketRoutingTests(unittest.TestCase):
         self.assertTrue(result["processing_log"][0]["bucket_fallback"])
         self.assertEqual(result["processing_log"][0]["fallback_reason"], "insufficient_bucket_hits")
         self.assertEqual([chunk["chunk_id"] for chunk in result["merged_chunks"]], ["f1", "f2", "m1"])
+
+    def test_multimodal_retrieve_prefers_faq_bucket_for_symptom_query_with_zenmeban(self):
+        calls = []
+
+        class FakeMilvus:
+            def hybrid_search(self, **kwargs):
+                calls.append(kwargs)
+                filter_expr = kwargs.get("filter_expr")
+                if filter_expr == 'retrieval_bucket == "faq"':
+                    return [
+                        {"chunk_id": "f1", "content": "faq-1", "metadata": {"retrieval_bucket": "faq"}},
+                        {"chunk_id": "f2", "content": "faq-2", "metadata": {"retrieval_bucket": "faq"}},
+                        {"chunk_id": "f3", "content": "faq-3", "metadata": {"retrieval_bucket": "faq"}},
+                    ]
+                return []
+
+        with (
+            patch("agents.knowledge.nodes.multimodal_retrieve.get_milvus_service", return_value=FakeMilvus()),
+            patch(
+                "app.services.multimodal_embedding_service.get_multimodal_embedding_service",
+                return_value=_FakeMultimodalEmbeddingService(),
+            ),
+            patch(
+                "app.services.retrieval_bucket.get_llm_service",
+                return_value=_FakeBucketRouterLLM({"顾客能进直播，但是直播画面显示没有画面怎么办？": "faq"}),
+            ),
+        ):
+            result = asyncio.run(
+                multimodal_retrieve(self._make_state("顾客能进直播，但是直播画面显示没有画面怎么办？"))
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["filter_expr"], 'retrieval_bucket == "faq"')
+        self.assertEqual(result["processing_log"][0]["preferred_bucket"], "faq")
+        self.assertFalse(result["processing_log"][0]["bucket_fallback"])
+        self.assertEqual([chunk["chunk_id"] for chunk in result["merged_chunks"]], ["f1", "f2", "f3"])
+
+    def test_multimodal_retrieve_skips_file_grouping_for_faq_bucket_queries(self):
+        calls = []
+
+        class FakeMilvus:
+            def hybrid_search(self, **kwargs):
+                calls.append(kwargs)
+                return [
+                    {"chunk_id": "f1", "content": "faq-1", "metadata": {"retrieval_bucket": "faq"}},
+                    {"chunk_id": "f2", "content": "faq-2", "metadata": {"retrieval_bucket": "faq"}},
+                    {"chunk_id": "f3", "content": "faq-3", "metadata": {"retrieval_bucket": "faq"}},
+                ]
+
+        with (
+            patch("agents.knowledge.nodes.multimodal_retrieve.get_milvus_service", return_value=FakeMilvus()),
+            patch(
+                "app.services.multimodal_embedding_service.get_multimodal_embedding_service",
+                return_value=_FakeMultimodalEmbeddingService(),
+            ),
+            patch(
+                "app.services.retrieval_bucket.get_llm_service",
+                return_value=_FakeBucketRouterLLM({"faq symptom query": "faq"}),
+            ),
+        ):
+            result = asyncio.run(
+                multimodal_retrieve(
+                    self._make_state("faq symptom query"),
+                    group_by_field="file_name",
+                    group_size=3,
+                    strict_group_size=False,
+                )
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["filter_expr"], 'retrieval_bucket == "faq"')
+        self.assertIsNone(calls[0].get("group_by_field"))
+        self.assertIsNone(calls[0].get("group_size"))
+        self.assertIsNone(calls[0].get("strict_group_size"))
+        self.assertEqual([chunk["chunk_id"] for chunk in result["merged_chunks"]], ["f1", "f2", "f3"])
+
+    def test_multimodal_retrieve_skips_file_grouping_without_bucket_hint(self):
+        calls = []
+
+        class FakeMilvus:
+            def hybrid_search(self, **kwargs):
+                calls.append(kwargs)
+                return [
+                    {"chunk_id": "c1", "content": "chunk-1", "metadata": {"retrieval_bucket": "manual"}},
+                    {"chunk_id": "c2", "content": "chunk-2", "metadata": {"retrieval_bucket": "faq"}},
+                ]
+
+        with (
+            patch("agents.knowledge.nodes.multimodal_retrieve.get_milvus_service", return_value=FakeMilvus()),
+            patch(
+                "app.services.multimodal_embedding_service.get_multimodal_embedding_service",
+                return_value=_FakeMultimodalEmbeddingService(),
+            ),
+            patch(
+                "app.services.retrieval_bucket.get_llm_service",
+                return_value=_FakeBucketRouterLLM({"ambiguous query": "none"}),
+            ),
+        ):
+            result = asyncio.run(
+                multimodal_retrieve(
+                    self._make_state("ambiguous query"),
+                    group_by_field="file_name",
+                    group_size=3,
+                    strict_group_size=False,
+                )
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0].get("filter_expr"))
+        self.assertIsNone(calls[0].get("group_by_field"))
+        self.assertIsNone(calls[0].get("group_size"))
+        self.assertIsNone(calls[0].get("strict_group_size"))
+        self.assertEqual([chunk["chunk_id"] for chunk in result["merged_chunks"]], ["c1", "c2"])
 
 
 if __name__ == "__main__":

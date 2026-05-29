@@ -1,8 +1,25 @@
 # -*- coding: utf-8 -*-
+import sys
+import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+import importlib.util
 
-from app.api.v1.auth_deps import get_request_identity
+if "psycopg2" not in sys.modules:
+    psycopg2_module = types.ModuleType("psycopg2")
+    psycopg2_module.pool = types.SimpleNamespace(ThreadedConnectionPool=object)
+    psycopg2_module.extras = types.SimpleNamespace(RealDictCursor=object)
+    sys.modules["psycopg2"] = psycopg2_module
+    sys.modules["psycopg2.pool"] = psycopg2_module.pool
+    sys.modules["psycopg2.extras"] = psycopg2_module.extras
+
+AUTH_DEPS_PATH = Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "auth_deps.py"
+AUTH_DEPS_SPEC = importlib.util.spec_from_file_location("test_auth_deps_module", AUTH_DEPS_PATH)
+AUTH_DEPS_MODULE = importlib.util.module_from_spec(AUTH_DEPS_SPEC)
+assert AUTH_DEPS_SPEC and AUTH_DEPS_SPEC.loader
+AUTH_DEPS_SPEC.loader.exec_module(AUTH_DEPS_MODULE)
+get_request_identity = AUTH_DEPS_MODULE.get_request_identity
 
 
 class AuthDepsIdentityTests(unittest.TestCase):

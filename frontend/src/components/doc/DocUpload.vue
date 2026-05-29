@@ -31,7 +31,7 @@
 
           <el-form-item label="切块策略">
             <el-radio-group v-model="config.chunkProfile" size="small">
-              <el-radio-button label="smart_mix">鏅鸿兘娣峰悎</el-radio-button>
+              <el-radio-button label="smart_mix">智能混合</el-radio-button>
               <el-radio-button label="parent_child">父子块</el-radio-button>
               <el-radio-button label="flat">普通切块</el-radio-button>
             </el-radio-group>
@@ -191,7 +191,7 @@
 
           <el-form-item label="切块策略">
             <el-radio-group v-model="catConfig.chunkProfile" size="small">
-              <el-radio-button label="smart_mix">鏅鸿兘娣峰悎</el-radio-button>
+              <el-radio-button label="smart_mix">智能混合</el-radio-button>
               <el-radio-button label="parent_child">父子块</el-radio-button>
               <el-radio-button label="flat">普通切块</el-radio-button>
             </el-radio-group>

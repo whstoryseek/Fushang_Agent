@@ -11,7 +11,7 @@ test('shared admin panel is limited to settings-related menus', () => {
     assert.equal(isAdminPanelMenu(key), true)
   }
 
-  for (const key of ['admin-data-import', 'admin-data-view', 'admin-service-tickets', 'chat', 'user-history']) {
+  for (const key of ['admin-data-import', 'admin-data-view', 'admin-service-tickets', 'admin-users', 'chat', 'user-history']) {
     assert.equal(isAdminPanelMenu(key), false)
   }
 })

@@ -227,6 +227,9 @@ _TABLES = [
         processing_ms   FLOAT,
         sender_id       TEXT,
         requester_name  TEXT,
+        entry_user_id   TEXT,
+        entry_user_name TEXT,
+        entry_source    TEXT,
         clarification_round INTEGER NOT NULL DEFAULT 0,
         clarification   JSONB NOT NULL DEFAULT '{}',
         note            TEXT,
@@ -242,8 +245,13 @@ _TABLES = [
     "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS note TEXT",
     "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS sender_id TEXT",
     "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS requester_name TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS entry_user_id TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS entry_user_name TEXT",
+    "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS entry_source TEXT",
     "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS clarification_round INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE service_ticket ADD COLUMN IF NOT EXISTS clarification JSONB NOT NULL DEFAULT '{}'",
+    "CREATE INDEX IF NOT EXISTS idx_service_ticket_entry_user ON service_ticket(entry_user_id, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_ticket_active_clarifying_unique ON service_ticket(user_id, COALESCE(session_id, ''), COALESCE(kb_name, '')) WHERE status = 'clarifying'",
     """
     CREATE TABLE IF NOT EXISTS service_ticket_context (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

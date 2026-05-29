@@ -30,6 +30,7 @@ class LLMService:
         max_tokens: int = 2000,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
+        disable_thinking: bool = False,
     ) -> str:
         """
         通用文本生成。
@@ -61,6 +62,8 @@ class LLMService:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if disable_thinking:
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
         response = client.chat.completions.create(
             **request_kwargs,
@@ -75,6 +78,7 @@ class LLMService:
         max_tokens: int = 2000,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
+        disable_thinking: bool = False,
     ) -> str:
         """
         多模态生成（支持图片输入）。
@@ -87,6 +91,7 @@ class LLMService:
             max_tokens=max_tokens,
             timeout=timeout,
             max_retries=max_retries,
+            disable_thinking=disable_thinking,
         )
 
     def responses_text(

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Literal, Optional, Tuple
 
+from app.core.config import settings
+from app.services.llm_service import get_llm_service
+
 RetrievalBucket = Literal["faq", "manual"]
+_ALLOWED_BUCKETS = {"faq", "manual", "none"}
+_ROUTER_MODEL = getattr(settings, "operation_classifier_model", "doubao-seed-2-0-mini-260428")
+_ROUTER_MAX_TOKENS = 80
+_ROUTER_TIMEOUT = 0.45
 
 _FAQ_FILE_HINTS = (
     "faq",
@@ -31,8 +38,6 @@ _MANUAL_FILE_HINTS = (
 )
 
 _MANUAL_QUERY_HINTS = (
-    "怎么",
-    "如何",
     "步骤",
     "流程",
     "操作",
@@ -83,21 +88,75 @@ def infer_retrieval_bucket(file_name: str) -> RetrievalBucket:
     return "manual"
 
 
+def _bucket_router_prompt(query: str) -> list[dict]:
+    return [
+        {
+            "role": "system",
+            "content": """
+你是知识库检索路由判断器，只输出一个 JSON 对象，不要输出 Markdown。
+
+你的任务是判断用户问题更应该优先检索哪一类知识：
+- faq：故障现象、异常、报错、状态问题、结果不符合预期、原因排查、怎么办
+- manual：操作步骤、配置方法、开通流程、准备资料、申请/提交流程
+- none：无法判断或两边都可能，直接走全量检索
+
+判断原则：
+1. 这是检索路由，不是工单意图分类。
+2. 只要问题核心是在描述“出了什么现象/什么结果不对/为什么没成功/怎么办”，优先 faq。
+3. 只有问题核心明显是在问“怎么操作/怎么配置/需要什么资料/开通流程/步骤”，才判 manual。
+4. 不要因为句子里出现“怎么”“怎么办”“如何”就机械判 manual，要看它是在问症状处理还是操作流程。
+5. 拿不准就输出 none。
+
+示例：
+- “顾客能进直播，但是直播画面显示没有画面怎么办？” => faq
+- “顾客在人康课堂已经提现但没有到微信怎么办？” => faq
+- “店长端无法打开” => faq
+- “开通微信子商户号需要准备哪些资料？” => manual
+- “如何配置税率自动分摊？” => manual
+
+输出固定字段：
+bucket, reason
+
+其中 bucket 只能是 faq、manual、none 之一。
+""",
+        },
+        {"role": "user", "content": query or ""},
+    ]
+
+
+def _normalize_bucket(value: object) -> Optional[RetrievalBucket]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"faq", "manual"}:
+        return normalized  # type: ignore[return-value]
+    return None
+
+
 def preferred_retrieval_bucket(query: str) -> Optional[RetrievalBucket]:
     normalized = (query or "").strip().lower()
     if not normalized:
         return None
-
-    if any(token in normalized for token in _MANUAL_QUERY_HINTS):
-        return "manual"
-
-    if any(token in normalized for token in _FAQ_QUERY_HINTS):
-        return "faq"
-
-    if len(normalized) <= 12:
+    if len(normalized) <= 2:
         return None
+    try:
+        text = get_llm_service().responses_text(
+            _bucket_router_prompt(query),
+            model=_ROUTER_MODEL,
+            temperature=0.0,
+            max_tokens=_ROUTER_MAX_TOKENS,
+            timeout=_ROUTER_TIMEOUT,
+            max_retries=0,
+        )
+        import json
 
-    return None
+        payload = json.loads((text or "").strip())
+        if not isinstance(payload, dict):
+            return None
+        bucket = str(payload.get("bucket") or "").strip().lower()
+        if bucket == "none" or bucket not in _ALLOWED_BUCKETS:
+            return None
+        return _normalize_bucket(bucket)
+    except Exception:
+        return None
 
 
 def resolve_chunking_strategy(

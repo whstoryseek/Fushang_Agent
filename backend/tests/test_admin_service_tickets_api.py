@@ -1,6 +1,38 @@
 # -*- coding: utf-8 -*-
+import sys
+import types
 import unittest
 from unittest.mock import AsyncMock, patch
+
+if "psycopg2" not in sys.modules:
+    psycopg2_module = types.ModuleType("psycopg2")
+    psycopg2_module.pool = types.SimpleNamespace(ThreadedConnectionPool=object)
+    psycopg2_module.extras = types.SimpleNamespace(RealDictCursor=object)
+    sys.modules["psycopg2"] = psycopg2_module
+    sys.modules["psycopg2.pool"] = psycopg2_module.pool
+    sys.modules["psycopg2.extras"] = psycopg2_module.extras
+
+if "dashscope" not in sys.modules:
+    dashscope_module = types.ModuleType("dashscope")
+    dashscope_module.TextEmbedding = types.SimpleNamespace(call=lambda *args, **kwargs: None)
+    dashscope_module.api_key = ""
+    sys.modules["dashscope"] = dashscope_module
+
+if "pymilvus" not in sys.modules:
+    pymilvus_module = types.ModuleType("pymilvus")
+    pymilvus_module.MilvusClient = object
+    pymilvus_module.DataType = types.SimpleNamespace(
+        VARCHAR="VARCHAR",
+        INT64="INT64",
+        SPARSE_FLOAT_VECTOR="SPARSE_FLOAT_VECTOR",
+        FLOAT_VECTOR="FLOAT_VECTOR",
+    )
+    pymilvus_module.Function = object
+    pymilvus_module.FunctionType = types.SimpleNamespace(BM25="BM25")
+    pymilvus_module.AnnSearchRequest = object
+    pymilvus_module.RRFRanker = object
+    pymilvus_module.WeightedRanker = object
+    sys.modules["pymilvus"] = pymilvus_module
 
 from app.api.v1.admin import service_tickets
 

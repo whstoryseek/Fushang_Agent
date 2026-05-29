@@ -76,6 +76,24 @@ def _kb_rag_result():
 
 
 class KnowledgeFullFlowFromKbTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_question_short_circuits_without_kb_lookup(self):
+        with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-kb"), patch(
+            "app.api.v1.knowledge.invoke_knowledge_qa",
+        ) as invoke_rag, patch(
+            "app.api.v1.knowledge.classify_ticket_intent_with_llm",
+        ) as classify, patch("app.api.v1.knowledge.persist_knowledge_result") as persist:
+            response = await knowledge.knowledge_qa(
+                KnowledgeRequest(query="你能做什么？", session_id="session-kb", collection="fushang"),
+                user_id="store-1",
+            )
+
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertIn("知识库问答", response.answer)
+        self.assertEqual(response.sources, [])
+        invoke_rag.assert_not_called()
+        classify.assert_not_called()
+        persist.assert_called_once()
+
     async def test_kb_tutorial_question_stays_normal_rag_d_flow(self):
         with patch("app.api.v1.knowledge.conversation_service.ensure_knowledge_session", return_value="session-kb"), patch(
             "app.api.v1.knowledge.invoke_knowledge_qa",

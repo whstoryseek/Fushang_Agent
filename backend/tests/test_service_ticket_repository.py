@@ -25,6 +25,13 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
         self.assertIn("idx_service_ticket_status", schema)
         self.assertIn("idx_service_ticket_context_ticket", schema)
         self.assertIn("clarification JSONB NOT NULL DEFAULT '{}'", schema)
+        self.assertIn("entry_user_id", schema)
+        self.assertIn("entry_user_name", schema)
+        self.assertIn("entry_source", schema)
+        self.assertIn("idx_service_ticket_active_clarifying_unique", schema)
+        self.assertIn("COALESCE(session_id, '')", schema)
+        self.assertIn("COALESCE(kb_name, '')", schema)
+        self.assertIn("WHERE status = 'clarifying'", schema)
 
     def test_create_with_contexts_persists_ticket_and_context_rows(self):
         repo = ServiceTicketRepository()
@@ -50,6 +57,9 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
                     "processing_ms": 123,
                     "sender_id": None,
                     "requester_name": "店长",
+                    "entry_user_id": "wangqizhi_l8el",
+                    "entry_user_name": "农资店王麒麟",
+                    "entry_source": "renruikeji_sso",
                     "clarification_round": 0,
                     "clarification": "{}",
                     "created_at": "2026-05-26 10:00:00+08",
@@ -71,6 +81,9 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
                 sources=[],
                 channel="web",
                 processing_ms=123,
+                entry_user_id="wangqizhi_l8el",
+                entry_user_name="农资店王麒麟",
+                entry_source="renruikeji_sso",
                 contexts=[
                     {
                         "chunk_id": "chunk-1",
@@ -87,10 +100,28 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
 
         self.assertEqual(ticket["id"], "ticket-1")
         self.assertEqual(ticket["status"], "resolved_ai")
+        self.assertEqual(ticket["entry_user_id"], "wangqizhi_l8el")
+        self.assertEqual(ticket["entry_user_name"], "农资店王麒麟")
+        self.assertEqual(ticket["entry_source"], "renruikeji_sso")
         returning.assert_called_once()
         many.assert_called_once()
         self.assertEqual(many.call_args.args[1][0][0], "ticket-1")
         self.assertEqual(many.call_args.args[1][0][1], "chunk-1")
+        self.assertIn("entry_user_id", returning.call_args.args[0])
+
+    def test_find_active_clarification_supports_row_locking(self):
+        repo = ServiceTicketRepository()
+
+        with patch.object(repo, "_execute_select", return_value=[]) as select:
+            ticket = repo.find_active_clarification(
+                session_id="session-1",
+                user_id="store-1",
+                kb_name="kb",
+                for_update=True,
+            )
+
+        self.assertIsNone(ticket)
+        self.assertIn("FOR UPDATE", select.call_args.args[0])
 
     def test_update_clarification_updates_status_and_collected_payload(self):
         repo = ServiceTicketRepository()
@@ -116,6 +147,9 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
                     "processing_ms": None,
                     "sender_id": "sender-1",
                     "requester_name": "店长",
+                    "entry_user_id": "wangqizhi_l8el",
+                    "entry_user_name": "农资店王麒麟",
+                    "entry_source": "renruikeji_sso",
                     "clarification_round": 3,
                     "clarification": '{"collected":{"phone":"13800138000"}}',
                     "note": None,
@@ -139,6 +173,53 @@ class ServiceTicketRepositoryTests(unittest.TestCase):
         self.assertEqual(ticket["clarification_round"], 3)
         self.assertEqual(ticket["clarification"]["collected"]["phone"], "13800138000")
         self.assertIn("clarification = %s", returning.call_args.args[0])
+
+    def test_update_clarification_unanswered_normal_marks_resolved_at(self):
+        repo = ServiceTicketRepository()
+
+        with patch.object(
+            repo,
+            "_execute_returning",
+            return_value=[
+                {
+                    "id": "ticket-1",
+                    "session_id": "session-1",
+                    "user_id": "store-1",
+                    "user_name": "店长",
+                    "kb_name": "kb",
+                    "query": "新活动政策刷新后没有显示是什么原因？",
+                    "answer": "当前知识库暂无相关信息",
+                    "status": "unanswered_normal",
+                    "confidence": 0.2,
+                    "fallback_reason": "no_relevant_documents",
+                    "quality_level": "low",
+                    "sources": "[]",
+                    "channel": "web",
+                    "processing_ms": None,
+                    "sender_id": None,
+                    "requester_name": "店长",
+                    "entry_user_id": "wangqizhi_l8el",
+                    "entry_user_name": "农资店王麒麟",
+                    "entry_source": "renruikeji_sso",
+                    "clarification_round": 2,
+                    "clarification": '{"intent_class":"D"}',
+                    "note": None,
+                    "created_at": "2026-05-26 10:00:00+08",
+                    "updated_at": "2026-05-26 10:02:00+08",
+                    "resolved_at": "2026-05-26 10:02:00+08",
+                }
+            ],
+        ) as returning:
+            ticket = repo.update_clarification(
+                "ticket-1",
+                status="unanswered_normal",
+                answer="当前知识库暂无相关信息",
+                clarification_round=2,
+                clarification={"intent_class": "D"},
+            )
+
+        self.assertEqual(ticket["status"], "unanswered_normal")
+        self.assertIn("resolved_at = COALESCE(resolved_at, NOW())", returning.call_args.args[0])
 
     def test_stats_counts_statuses_and_daily_rows(self):
         repo = ServiceTicketRepository()

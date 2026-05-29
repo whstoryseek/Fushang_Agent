@@ -47,8 +47,8 @@
           <el-icon><component :is="m.icon" /></el-icon>
           <span>{{ m.label }}</span>
           <span v-if="chatMode === m.value" class="mode-tab-glow" />
-        </button>
-      </div>
+          </button>
+        </div>
       <div class="toolbar-right">
         <template v-if="chatMode === 'knowledge'">
           <div v-if="!isStoreEntry" class="collection-select-wrap">
@@ -151,7 +151,10 @@
           <div class="bubble-wrap">
             <div class="bubble" :class="msg.role">
               <div class="bubble-text" v-if="!msg.isHtml" style="white-space:pre-wrap">
-                <img v-if="msg.queryImagePreview" :src="msg.queryImagePreview" style="max-width:120px;border-radius:6px;margin-bottom:4px;display:block" />
+                <div v-if="msg.queryImagePreviews?.length" class="msg-query-images">
+                  <img v-for="(preview, previewIdx) in msg.queryImagePreviews" :key="`${i}-preview-${previewIdx}`" :src="preview" style="max-width:120px;border-radius:6px;margin-bottom:4px;display:block" />
+                </div>
+                <img v-else-if="msg.queryImagePreview" :src="msg.queryImagePreview" style="max-width:120px;border-radius:6px;margin-bottom:4px;display:block" />
                 {{ msg.content }}
               </div>
               <div class="bubble-text" v-else-if="msg.isHtml">
@@ -226,11 +229,13 @@
     <!-- Input area -->
     <div class="input-area" :class="{ focused: inputFocused }">
       <!-- 多模态图片预览 -->
-      <div v-if="queryImagePreview" class="query-image-preview">
-        <img :src="queryImagePreview" class="query-img-thumb" />
-        <button class="query-img-remove" @click="clearQueryImage" title="移除图片">
-          <svg viewBox="0 0 10 10" fill="none"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-        </button>
+      <div v-if="queryImagePreviews.length" class="query-image-preview">
+        <div v-for="(preview, previewIdx) in queryImagePreviews" :key="preview" class="query-img-item">
+          <img :src="preview" class="query-img-thumb" />
+          <button class="query-img-remove" @click="removeQueryImage(previewIdx)" title="移除图片">
+            <svg viewBox="0 0 10 10" fill="none"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+        </div>
       </div>
       <div class="input-wrap">
         <el-input v-model="inputMessage" type="textarea"
@@ -244,8 +249,8 @@
       </div>
       <!-- 多模态图片上传按钮（仅多模态知识库显示） -->
       <template v-if="chatMode === 'knowledge' && (isMultimodalKb || isStoreEntry)">
-        <input ref="queryImageInput" type="file" accept="image/*" style="display:none" @change="onQueryImageChange" />
-        <button class="icon-btn img-upload-btn" :class="{ active: !!queryImagePreview }" @click="queryImageInput.click()" title="上传查询图片（多模态知识库）">
+        <input ref="queryImageInput" type="file" accept="image/*" multiple style="display:none" @change="onQueryImageChange" />
+        <button class="icon-btn img-upload-btn" :class="{ active: queryImagePreviews.length > 0 }" @click="queryImageInput.click()" title="上传查询图片（多模态知识库）">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <rect x="3" y="3" width="18" height="18" rx="3"/>
             <circle cx="8.5" cy="8.5" r="1.5"/>
@@ -287,6 +292,7 @@ import { ElMessage } from 'element-plus'
 import { apiService } from '../services/api'
 import { docApi } from '../services/docApi'
 import { getDailySessionTitle } from '../utils/entryIdentity.mjs'
+import { mergeSelectedQueryImages } from '../utils/queryImages.mjs'
 import MarkdownIt from 'markdown-it'
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true })
@@ -315,21 +321,35 @@ const toggleKeywordFilter = () => {
 }
 
 // 多模态查询图片
-const queryImage = ref(null)      // File 对象
-const queryImagePreview = ref('') // base64 预览
+const queryImages = ref([])
+const queryImagePreviews = ref([])
 const queryImageInput = ref(null)
 const onQueryImageChange = (e) => {
-  const file = e.target.files[0]
-  if (!file) return
-  queryImage.value = file
-  const reader = new FileReader()
-  reader.onload = (ev) => { queryImagePreview.value = ev.target.result }
-  reader.readAsDataURL(file)
+  const selectedFiles = Array.from(e.target.files || [])
+  if (!selectedFiles.length) return
+
+  const mergedFiles = mergeSelectedQueryImages(queryImages.value, selectedFiles)
+  const addedFiles = mergedFiles.slice(queryImages.value.length)
+  queryImages.value = mergedFiles
+
+  for (const file of addedFiles) {
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      queryImagePreviews.value = [...queryImagePreviews.value, ev.target.result]
+    }
+    reader.readAsDataURL(file)
+  }
+
+  if (queryImageInput.value) queryImageInput.value.value = ''
 }
 const clearQueryImage = () => {
-  queryImage.value = null
-  queryImagePreview.value = ''
+  queryImages.value = []
+  queryImagePreviews.value = []
   if (queryImageInput.value) queryImageInput.value.value = ''
+}
+const removeQueryImage = (index) => {
+  queryImages.value = queryImages.value.filter((_, idx) => idx !== index)
+  queryImagePreviews.value = queryImagePreviews.value.filter((_, idx) => idx !== index)
 }
 
 // 压缩图片并返回 base64（不含 data:xxx;base64, 前缀）
@@ -580,7 +600,7 @@ const modes = computed(() => {
 })
 const suggestions = {
   general:   ['你能做什么？', '帮我搜索最新资讯', '发送一封邮件'],
-  knowledge: ['你能做什么？', '鸡蛋可以用来做什么？', '鱼可以用来做什么菜？'],
+  knowledge: ['微信子商户号开通需要什么资料？', '富友账户绑定门店需要什么材料？', '企业微信发不了红包是什么原因？'],
 }
 
 const canSend = computed(() =>
@@ -635,7 +655,10 @@ const sendMessage = async () => {
   if (!canSend.value || !text) return
   // 用户消息：若有查询图片，把预览 URL 一起存入消息对象用于实时显示
   const userMsg = { role: 'user', content: text, timestamp: new Date() }
-  if (queryImagePreview.value) userMsg.queryImagePreview = queryImagePreview.value
+  if (queryImagePreviews.value.length) {
+    userMsg.queryImagePreviews = [...queryImagePreviews.value]
+    userMsg.queryImagePreview = queryImagePreviews.value[0]
+  }
   messages.value.push(userMsg)
   inputMessage.value = ''
   loading.value = true
@@ -644,8 +667,12 @@ const sendMessage = async () => {
     if (chatMode.value === 'knowledge') {
       // 多模态：图片压缩后转 base64（最大 800px，质量 0.7，减小传输体积）
       let queryImageBase64 = null
-      if (queryImage.value) {
-        queryImageBase64 = await compressImageToBase64(queryImage.value, 800, 0.7)
+      let queryImagesBase64 = []
+      if (queryImages.value.length) {
+        queryImagesBase64 = (await Promise.all(
+          queryImages.value.map(file => compressImageToBase64(file, 800, 0.7)),
+        )).filter(Boolean)
+        queryImageBase64 = queryImagesBase64[0] || null
       }
       messages.value.push({
         role: 'assistant', isHtml: true, content: '',
@@ -664,7 +691,8 @@ const sendMessage = async () => {
           collection: selectedCollection.value || null,
           force_multi_doc: forceMultiDoc.value || null,
           keyword_filter: (keywordFilterEnabled.value && keywordFilter.value) ? keywordFilter.value : null,
-          query_image: queryImageBase64,
+          query_image: queryImagesBase64.length === 1 ? queryImageBase64 : null,
+          query_images: queryImagesBase64.length > 1 ? queryImagesBase64 : null,
         },
         {
           onMeta: (m) => {
@@ -801,10 +829,10 @@ defineExpose({ clearMessages })
   height: calc(100vh - 108px);
   width: 100%;
   max-width: 100%;
-  background: rgba(255,255,255,0.025);
-  border: 1px solid rgba(255,255,255,0.09);
+  background: rgba(255,255,255,0.9);
+  border: 1px solid rgba(217, 226, 236, 0.92);
   border-radius: 18px; overflow: hidden;
-  box-shadow: 0 8px 40px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04) inset;
+  box-shadow: 0 18px 40px rgba(31, 45, 61, 0.08);
   position: relative;
 }
 :global(.store-entry) .chat-wrapper {
@@ -817,22 +845,22 @@ defineExpose({ clearMessages })
   max-width: 100%;
 }
 .store-chat-main {
-  background: rgba(255,255,255,0.018);
+  background: rgba(255,255,255,0.94);
 }
 
 /* ── Session Sidebar ── */
 .session-sidebar {
   width: 200px; flex-shrink: 0;
   display: flex; flex-direction: column;
-  background: rgba(0,0,0,0.15);
-  border-right: 1px solid rgba(255,255,255,0.06);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(242, 246, 250, 0.95));
+  border-right: 1px solid rgba(217, 226, 236, 0.9);
 }
 .sidebar-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 12px 8px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  border-bottom: 1px solid rgba(217, 226, 236, 0.7);
 }
-.sidebar-title { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.4); letter-spacing: 0.5px; }
+.sidebar-title { font-size: 12px; font-weight: 600; color: #7b8d9e; letter-spacing: 0.5px; }
 .sidebar-new-btn {
   display: flex; align-items: center; gap: 4px;
   padding: 3px 8px; border-radius: 6px; border: none; cursor: pointer;
@@ -845,25 +873,25 @@ defineExpose({ clearMessages })
 .sidebar-new-btn svg { width: 10px; height: 10px; }
 .session-list { flex: 1; overflow-y: auto; padding: 6px 6px; }
 .session-list::-webkit-scrollbar { width: 3px; }
-.session-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 99px; }
-.session-empty { font-size: 11px; color: rgba(255,255,255,0.2); text-align: center; padding: 20px 0; }
+.session-list::-webkit-scrollbar-thumb { background: rgba(191, 208, 224, 0.95); border-radius: 99px; }
+.session-empty { font-size: 11px; color: #a0adba; text-align: center; padding: 20px 0; }
 .session-item {
   position: relative; padding: 8px 10px; border-radius: 8px; cursor: pointer;
   margin-bottom: 2px;
   transition: background 0.15s;
 }
-.session-item:hover { background: rgba(255,255,255,0.05); }
-.session-item.active { background: rgba(79,142,247,0.12); }
+.session-item:hover { background: rgba(79,142,247,0.06); }
+.session-item.active { background: rgba(79,142,247,0.1); }
 .session-item-title {
-  font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.7);
+  font-size: 12px; font-weight: 500; color: #55697d;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   padding-right: 18px;
 }
-.session-item-meta { font-size: 10px; color: rgba(255,255,255,0.25); margin-top: 2px; }
+.session-item-meta { font-size: 10px; color: #9aa8b5; margin-top: 2px; }
 .session-delete-btn {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   width: 16px; height: 16px; border-radius: 4px; border: none; cursor: pointer;
-  background: transparent; color: rgba(255,255,255,0.2);
+  background: transparent; color: #a2afbb;
   display: flex; align-items: center; justify-content: center; padding: 2px;
   opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
@@ -883,24 +911,24 @@ defineExpose({ clearMessages })
 .chat-toolbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 16px;
-  background: rgba(255,255,255,0.02);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.92);
+  border-bottom: 1px solid rgba(217, 226, 236, 0.75);
   flex-shrink: 0;
 }
 .chat-toolbar.compact {
   justify-content: flex-start;
   min-height: 40px;
   padding: 8px 14px;
-  background: rgba(255,255,255,0.012);
+  background: rgba(248, 250, 252, 0.96);
 }
 .mode-tabs { display: flex; gap: 4px; min-width: 0; }
 .mode-tab {
   position: relative; display: flex; align-items: center; gap: 6px;
   padding: 6px 14px; border-radius: 9px; border: none; cursor: pointer;
-  font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.35);
+  font-size: 13px; font-weight: 500; color: #8998a7;
   background: transparent; transition: all 0.2s; overflow: hidden;
 }
-.mode-tab:hover { color: rgba(255,255,255,0.65); background: rgba(255,255,255,0.05); }
+.mode-tab:hover { color: #647689; background: rgba(79,142,247,0.06); }
 .mode-tab.active { color: #7eb3ff; background: rgba(79,142,247,0.12); }
 .mode-tab-glow {
   position: absolute; inset: 0; border-radius: 9px;
@@ -910,14 +938,14 @@ defineExpose({ clearMessages })
 .toolbar-right { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .collection-select-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .collection-select-wrap :deep(.el-select) { max-width: 100%; }
-.col-icon { color: rgba(255,255,255,0.3); font-size: 14px; }
+.col-icon { color: #99a6b3; font-size: 14px; }
 .no-kb-hint { font-size: 11px; color: #f06b6b; }
 .store-kb-label {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: rgba(255,255,255,0.5);
+  color: #8292a2;
   font-size: 12px;
 }
 .kb-options { display: flex; align-items: center; gap: 6px; }
@@ -927,16 +955,16 @@ defineExpose({ clearMessages })
   position: relative; display: flex; align-items: center; gap: 5px;
   padding: 4px 10px 4px 8px; border-radius: 99px; border: none; cursor: pointer;
   font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
-  color: rgba(255,255,255,0.3);
-  background: rgba(255,255,255,0.04);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+  color: #607282;
+  background: #f5f8fc;
+  box-shadow: inset 0 0 0 1px rgba(191,208,224,0.7);
   transition: color 0.2s, background 0.2s, box-shadow 0.2s, transform 0.15s;
   overflow: hidden;
   white-space: nowrap;
 }
 .opt-pill:hover {
-  color: rgba(255,255,255,0.6);
-  background: rgba(255,255,255,0.07);
+  color: #718394;
+  background: #eef4fb;
   transform: translateY(-1px);
 }
 .opt-pill:active { transform: scale(0.96); }
@@ -944,7 +972,7 @@ defineExpose({ clearMessages })
 /* 激活态 — 多文档用蓝紫渐变，关键词用青绿 */
 .opt-pill.active {
   color: #fff;
-  background: rgba(79,142,247,0.18);
+  background: linear-gradient(135deg, #4f8ef7, #6fa4f6);
   box-shadow: inset 0 0 0 1px rgba(79,142,247,0.5), 0 0 12px rgba(79,142,247,0.25);
 }
 .opt-pill.active .opt-pill-dot {
@@ -953,7 +981,7 @@ defineExpose({ clearMessages })
 }
 /* 第二个 pill（关键词）激活用青绿 */
 .opt-pill:nth-child(2).active {
-  background: rgba(45,212,160,0.15);
+  background: linear-gradient(135deg, #22b07d, #39c792);
   box-shadow: inset 0 0 0 1px rgba(45,212,160,0.45), 0 0 12px rgba(45,212,160,0.2);
 }
 .opt-pill:nth-child(2).active .opt-pill-dot {
@@ -964,7 +992,7 @@ defineExpose({ clearMessages })
 /* 状态指示点 */
 .opt-pill-dot {
   width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
-  background: rgba(255,255,255,0.2);
+  background: #a8b7c5;
   transition: background 0.25s, box-shadow 0.25s;
 }
 
@@ -994,29 +1022,33 @@ defineExpose({ clearMessages })
 .kw-input-wrap {
   display: flex; align-items: center; gap: 6px;
   padding: 3px 8px 3px 10px; border-radius: 99px;
-  background: rgba(255,255,255,0.04);
-  box-shadow: inset 0 0 0 1px rgba(45,212,160,0.35), 0 0 10px rgba(45,212,160,0.1);
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(45,212,160,0.28), 0 8px 18px rgba(34,176,125,0.08);
   min-width: 0;
 }
 .kw-input-icon { width: 11px; height: 11px; color: #2dd4a0; flex-shrink: 0; opacity: 0.7; }
 .kw-input {
   border: none; outline: none; background: transparent;
-  font-size: 11px; color: rgba(255,255,255,0.75); width: 130px;
+  font-size: 11px; color: #617486; width: 130px;
   font-family: inherit;
 }
-.kw-input::placeholder { color: rgba(255,255,255,0.2); }
+.kw-input::placeholder { color: #9aa8b5; }
 .kw-clear {
   width: 14px; height: 14px; border-radius: 50%; border: none; cursor: pointer; flex-shrink: 0;
-  background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.35);
+  background: #f3f6fa; color: #a5b1bc;
   display: flex; align-items: center; justify-content: center; padding: 2px;
   transition: background 0.15s, color 0.15s;
 }
 .kw-clear:hover { background: rgba(240,107,107,0.2); color: #f06b6b; }
-.img-upload-btn { color: rgba(255,255,255,0.35); }
+.img-upload-btn { color: #99a6b3; }
 .img-upload-btn.active { color: #2dd4a0; }
 .query-image-preview {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 6px 12px 0;
+}
+.query-img-item {
+  position: relative;
+  display: inline-flex;
 }
 .query-img-thumb {
   width: 48px; height: 48px; object-fit: cover; border-radius: 6px;
@@ -1026,8 +1058,15 @@ defineExpose({ clearMessages })
   width: 18px; height: 18px; border-radius: 50%; border: none; cursor: pointer;
   background: rgba(240,107,107,0.2); color: #f06b6b;
   display: flex; align-items: center; justify-content: center; padding: 3px;
+  position: absolute; top: -4px; right: -4px;
 }
 .query-img-remove svg { width: 100%; height: 100%; }
+.msg-query-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
 
 /* kw-slide transition */
 .kw-slide-enter-active { transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1); }
@@ -1041,14 +1080,15 @@ defineExpose({ clearMessages })
   text-transform: uppercase; letter-spacing: 0.8px;
 }
 .mode-badge.general { background: rgba(148,163,184,0.1); color: rgba(255,255,255,0.3); }
-.mode-badge.knowledge { background: rgba(45,212,160,0.1); color: #2dd4a0; }
+.mode-badge.general { background: #eef3f8; color: #8b99a8; }
+.mode-badge.knowledge { background: rgba(34,176,125,0.12); color: #22b07d; }
 .icon-btn {
   width: 30px; height: 30px; border-radius: 8px; border: none; cursor: pointer;
-  background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.3);
+  background: #f4f7fb; color: #6f8192;
   display: flex; align-items: center; justify-content: center; font-size: 14px;
   transition: all 0.2s;
 }
-.icon-btn:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.6); }
+.icon-btn:hover { background: #ebf3fb; color: #66798c; }
 
 /* ── Messages ── */
 .messages {
@@ -1056,7 +1096,7 @@ defineExpose({ clearMessages })
   display: flex; flex-direction: column; gap: 0;
 }
 .messages::-webkit-scrollbar { width: 4px; }
-.messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 99px; }
+.messages::-webkit-scrollbar-thumb { background: rgba(191, 208, 224, 0.95); border-radius: 99px; }
 
 /* ── Welcome screen ── */
 .welcome-screen {
@@ -1097,20 +1137,20 @@ defineExpose({ clearMessages })
   font-size: 28px; color: #7eb3ff; z-index: 1;
   filter: drop-shadow(0 0 14px rgba(79,142,247,0.8));
 }
-.welcome-title { font-size: 22px; font-weight: 700; color: #f0f4ff; margin: 0 0 8px; letter-spacing: -0.3px; }
-.welcome-sub { font-size: 13px; color: rgba(255,255,255,0.3); margin: 0 0 28px; max-width: 360px; }
+.welcome-title { font-size: 22px; font-weight: 700; color: #5a6d80; margin: 0 0 8px; letter-spacing: -0.3px; }
+.welcome-sub { font-size: 13px; color: #9aa8b5; margin: 0 0 28px; max-width: 360px; }
 .suggestion-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-width: 560px; width: 100%; }
 .suggestion-card {
   display: flex; align-items: center; gap: 8px;
   padding: 10px 14px; border-radius: 10px; cursor: pointer;
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.07);
-  color: rgba(255,255,255,0.45); font-size: 12px; text-align: left;
+  background: rgba(255,255,255,0.95);
+  border: 1px solid rgba(217, 226, 236, 0.9);
+  color: #7a8b9b; font-size: 12px; text-align: left;
   transition: all 0.2s;
 }
 .suggestion-card:hover {
-  background: rgba(79,142,247,0.08); border-color: rgba(79,142,247,0.25);
-  color: #7eb3ff; transform: translateY(-1px);
+  background: #f7fbff; border-color: rgba(79,142,247,0.28);
+  color: #4f8ef7; transform: translateY(-1px);
 }
 
 /* ── Message rows ── */
@@ -1181,10 +1221,10 @@ defineExpose({ clearMessages })
   word-break: break-word; position: relative;
 }
 .bubble.assistant {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.98);
+  border: 1px solid rgba(217, 226, 236, 0.88);
   border-radius: 4px 16px 16px 16px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  box-shadow: 0 10px 24px rgba(31, 45, 61, 0.08);
   padding-left: 18px;
 }
 /* 渐变竖线用伪元素实现，避免 border-image 破坏 border-radius */
@@ -1196,11 +1236,11 @@ defineExpose({ clearMessages })
   box-shadow: 0 0 8px rgba(79,142,247,0.5);
 }
 .bubble.user {
-  background: linear-gradient(135deg, #2d5fc4 0%, #6d28d9 100%);
-  border: 1px solid rgba(109,40,217,0.35);
+  background: linear-gradient(135deg, #4f8ef7 0%, #6ea7fb 100%);
+  border: 1px solid rgba(79,142,247,0.3);
   border-radius: 16px 4px 16px 16px;
   color: #fff;
-  box-shadow: 0 4px 24px rgba(59,111,212,0.4), 0 0 0 1px rgba(255,255,255,0.06) inset;
+  box-shadow: 0 10px 24px rgba(79,142,247,0.22), 0 0 0 1px rgba(255,255,255,0.08) inset;
   position: relative; overflow: hidden;
 }
 /* 用户气泡内光效 */
@@ -1212,7 +1252,7 @@ defineExpose({ clearMessages })
 }
 
 /* Bubble text / markdown */
-.bubble-text { font-size: 14px; line-height: 1.65; color: #e2e8f0; }
+.bubble-text { font-size: 14px; line-height: 1.65; color: #586d80; }
 .bubble.user .bubble-text { color: #fff; }
 .bubble-text :deep(p) { margin: 4px 0; }
 .bubble-text :deep(h1),.bubble-text :deep(h2),.bubble-text :deep(h3) { margin: 10px 0 6px; font-weight: 600; }
@@ -1220,12 +1260,12 @@ defineExpose({ clearMessages })
 .bubble-text :deep(ul),.bubble-text :deep(ol) { padding-left: 18px; margin: 6px 0; }
 .bubble-text :deep(li) { margin: 2px 0; }
 .bubble-text :deep(code) { background: rgba(79,142,247,0.12); border-radius: 4px; padding: 1px 5px; font-size: 12px; color: #7eb3ff; font-family: 'Fira Code', monospace; }
-.bubble-text :deep(pre) { background: #0d1117; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; }
-.bubble-text :deep(pre code) { background: none; color: #7dd3fc; padding: 0; }
-.bubble-text :deep(blockquote) { border-left: 2px solid rgba(79,142,247,0.4); margin: 6px 0; padding: 4px 12px; color: rgba(255,255,255,0.4); }
+.bubble-text :deep(pre) { background: #f4f7fb; border: 1px solid rgba(217,226,236,0.95); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; }
+.bubble-text :deep(pre code) { background: none; color: #315d8c; padding: 0; }
+.bubble-text :deep(blockquote) { border-left: 2px solid rgba(79,142,247,0.4); margin: 6px 0; padding: 4px 12px; color: #637789; }
 .bubble-text :deep(table) { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
-.bubble-text :deep(th),.bubble-text :deep(td) { border: 1px solid rgba(255,255,255,0.08); padding: 6px 10px; }
-.bubble-text :deep(th) { background: rgba(255,255,255,0.04); font-weight: 600; }
+.bubble-text :deep(th),.bubble-text :deep(td) { border: 1px solid rgba(217,226,236,0.9); padding: 6px 10px; }
+.bubble-text :deep(th) { background: #f4f7fb; font-weight: 600; }
 .bubble-text :deep(a) { color: #7eb3ff; text-decoration: none; }
 .bubble-text :deep(a:hover) { text-decoration: underline; }
 .bubble-text :deep(img) {
@@ -1237,29 +1277,28 @@ defineExpose({ clearMessages })
   border-radius: 10px;
   margin: 8px 0;
   display: block;
-  border: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-  filter: brightness(0.92) contrast(1.04);
-  mix-blend-mode: luminosity;
+  border: 1px solid rgba(217,226,236,0.9);
+  box-shadow: 0 10px 24px rgba(31,45,61,0.12);
+  filter: none;
+  mix-blend-mode: normal;
   transition: filter 0.2s, transform 0.2s, box-shadow 0.2s;
   cursor: zoom-in;
 }
 .bubble-text :deep(img:hover) {
-  filter: brightness(1) contrast(1.06);
-  mix-blend-mode: normal;
+  filter: none;
   transform: scale(1.02);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  box-shadow: 0 14px 34px rgba(31,45,61,0.16);
 }
-.bubble-text :deep(hr) { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0; }
+.bubble-text :deep(hr) { border: none; border-top: 1px solid rgba(217,226,236,0.9); margin: 10px 0; }
 .bubble.user .bubble-text :deep(code) { background: rgba(255,255,255,0.15); color: #fff; }
 .bubble.user .bubble-text :deep(a) { color: rgba(255,255,255,0.85); }
 
 /* Meta row (tools) */
 .meta-row {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.07);
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(217,226,236,0.88);
 }
-.meta-label { font-size: 10px; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 0.5px; }
+.meta-label { font-size: 10px; color: #9ca9b6; text-transform: uppercase; letter-spacing: 0.5px; }
 .tool-chip {
   font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 5px;
   background: rgba(245,200,66,0.1); color: #f5c842;
@@ -1267,16 +1306,16 @@ defineExpose({ clearMessages })
 }
 
 /* Sources */
-.sources-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.07); }
+.sources-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(217,226,236,0.88); }
 .sources-toggle {
   display: flex; align-items: center; gap: 6px;
   background: none; border: none; cursor: pointer; padding: 0;
-  color: rgba(255,255,255,0.4); font-size: 12px; transition: color 0.2s;
+  color: #637789; font-size: 12px; transition: color 0.2s;
 }
 .sources-toggle:hover { color: #7eb3ff; }
 .sources-count {
   margin-left: 2px; font-size: 10px; padding: 1px 6px; border-radius: 4px;
-  background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.3);
+  background: #edf2f7; color: #9aa7b4;
 }
 .toggle-arrow { font-size: 11px; transition: transform 0.25s; }
 .toggle-arrow.open { transform: rotate(180deg); }
@@ -1284,21 +1323,21 @@ defineExpose({ clearMessages })
 .source-card {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; border-radius: 8px;
-  background: rgba(79,142,247,0.06); border: 1px solid rgba(79,142,247,0.12);
+  background: rgba(79,142,247,0.05); border: 1px solid rgba(79,142,247,0.16);
 }
 .source-dot { width: 5px; height: 5px; border-radius: 50%; background: #7eb3ff; flex-shrink: 0; }
-.source-name { font-size: 12px; color: rgba(255,255,255,0.5); }
+.source-name { font-size: 12px; color: #7a8b9a; }
 
 /* Confidence arc */
 .confidence-row {
   display: flex; align-items: center; gap: 6px;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.07);
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(217,226,236,0.88);
 }
 .conf-arc { width: 52px; height: 30px; }
-.conf-label { font-size: 11px; color: rgba(255,255,255,0.3); }
+.conf-label { font-size: 11px; color: #9aa7b4; }
 
 /* Msg time */
-.msg-time { font-size: 10px; color: rgba(255,255,255,0.2); margin-top: 5px; padding: 0 4px; }
+.msg-time { font-size: 10px; color: #a6b2bd; margin-top: 5px; padding: 0 4px; }
 
 /* Typing indicator */
 .typing-bubble {
@@ -1323,8 +1362,8 @@ defineExpose({ clearMessages })
 /* ── Input area ── */
 .input-area {
   display: flex; gap: 10px; padding: 14px 16px; align-items: flex-end;
-  background: rgba(255,255,255,0.02);
-  border-top: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.96);
+  border-top: 1px solid rgba(217, 226, 236, 0.78);
   flex-shrink: 0;
   min-width: 0;
   transition: border-top-color 0.25s;
@@ -1338,17 +1377,17 @@ defineExpose({ clearMessages })
 }
 .char-count {
   position: absolute; bottom: 8px; right: 10px;
-  font-size: 10px; color: rgba(255,255,255,0.2); pointer-events: none;
+  font-size: 10px; color: #afb9c3; pointer-events: none;
 }
 .char-count.warn { color: #f06b6b; }
 
 /* Send button */
 .send-btn {
   width: 44px; height: 44px; border-radius: 50%; border: none; cursor: pointer;
-  background: linear-gradient(135deg, #3b6fd4, #7c3aed);
+  background: linear-gradient(135deg, #4f8ef7, #689ff6);
   color: #fff; display: flex; align-items: center; justify-content: center;
   flex-shrink: 0; transition: all 0.25s cubic-bezier(0.4,0,0.2,1);
-  box-shadow: 0 2px 16px rgba(59,111,212,0.5), 0 0 0 1px rgba(255,255,255,0.08) inset;
+  box-shadow: 0 8px 20px rgba(79,142,247,0.26), 0 0 0 1px rgba(255,255,255,0.08) inset;
   position: relative; overflow: hidden;
 }
 .send-btn::before {
@@ -1358,7 +1397,7 @@ defineExpose({ clearMessages })
   pointer-events: none;
 }
 .send-btn:hover:not(.disabled) {
-  box-shadow: 0 6px 28px rgba(59,111,212,0.7), 0 0 0 3px rgba(79,142,247,0.25), 0 0 0 1px rgba(255,255,255,0.1) inset;
+  box-shadow: 0 12px 28px rgba(79,142,247,0.3), 0 0 0 3px rgba(79,142,247,0.18), 0 0 0 1px rgba(255,255,255,0.1) inset;
   transform: translateY(-2px) scale(1.04);
 }
 .send-btn:active:not(.disabled) { transform: translateY(0) scale(0.97); }
@@ -1449,7 +1488,7 @@ defineExpose({ clearMessages })
     inset: 0 auto 0 0;
     z-index: 5;
     width: min(280px, 82vw);
-    box-shadow: 18px 0 40px rgba(0,0,0,0.38);
+    box-shadow: 18px 0 40px rgba(31,45,61,0.14);
   }
 
   .chat-toolbar {

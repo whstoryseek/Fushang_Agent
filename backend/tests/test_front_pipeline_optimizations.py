@@ -117,6 +117,7 @@ class FrontPipelineNodeTests(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["max_tokens"], 64)
         self.assertEqual(llm.chat.call_args.kwargs["timeout"], 5.0)
         self.assertEqual(llm.chat.call_args.kwargs["max_retries"], 0)
+        self.assertTrue(llm.chat.call_args.kwargs["disable_thinking"])
 
     @patch("agents.knowledge.nodes.query_rewrite.get_llm_service")
     def test_query_rewrite_uses_lite_model_for_context_dependent_query(self, mock_get_llm_service):
@@ -132,6 +133,7 @@ class FrontPipelineNodeTests(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["max_tokens"], 64)
         self.assertEqual(llm.chat.call_args.kwargs["timeout"], 5.0)
         self.assertEqual(llm.chat.call_args.kwargs["max_retries"], 0)
+        self.assertTrue(llm.chat.call_args.kwargs["disable_thinking"])
 
     @patch("agents.knowledge.nodes.query_rewrite.get_llm_service")
     def test_query_rewrite_falls_back_to_original_query_on_blank_output(self, mock_get_llm_service):
@@ -162,6 +164,7 @@ class FrontPipelineNodeTests(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["max_tokens"], 8)
         self.assertEqual(llm.chat.call_args.kwargs["timeout"], 5.0)
         self.assertEqual(llm.chat.call_args.kwargs["max_retries"], 0)
+        self.assertTrue(llm.chat.call_args.kwargs["disable_thinking"])
 
     @patch("agents.knowledge.nodes.query_classify.get_llm_service")
     def test_query_classify_accepts_chinese_output_labels(self, mock_get_llm_service):

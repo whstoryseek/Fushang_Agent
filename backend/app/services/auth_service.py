@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.db import get_auth_user_repository
 
 ALGORITHM = "HS256"
+ALLOWED_ADMIN_ROLES = {"super_admin", "sub_admin"}
 
 
 def hash_password(password: str) -> str:
@@ -30,6 +31,7 @@ def create_access_token(
     subject: str,
     username: str,
     role: str,
+    admin_role: Optional[str] = None,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
     expires = datetime.now(timezone.utc) + (
@@ -42,6 +44,8 @@ def create_access_token(
         "exp": expires,
         "iat": datetime.now(timezone.utc),
     }
+    if admin_role:
+        payload["admin_role"] = admin_role
     return jwt.encode(payload, settings.auth_secret_key, algorithm=ALGORITHM)
 
 
@@ -49,11 +53,20 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     return jwt.decode(token, settings.auth_secret_key, algorithms=[ALGORITHM])
 
 
+def build_auth_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "role": "admin",
+        "admin_role": user["role"],
+    }
+
+
 def authenticate_admin(username: str, password: str) -> Optional[Dict[str, Any]]:
     user = get_auth_user_repository().get_by_username(username)
     if not user or not user.get("is_active"):
         return None
-    if user.get("role") != "admin":
+    if user.get("role") not in ALLOWED_ADMIN_ROLES:
         return None
     if not verify_password(password, user.get("password_hash", "")):
         return None
@@ -67,8 +80,12 @@ def seed_admin_user(username: str, password: str, repo=None) -> Dict[str, Any]:
     password_hash = hash_password(password)
     existing = repo.get_by_username(username)
     if existing:
-        return repo.update_password(user_id=existing["id"], password_hash=password_hash) or existing
-    return repo.create_user(username=username, password_hash=password_hash, role="admin")
+        return repo.update_password(
+            user_id=existing["id"],
+            password_hash=password_hash,
+            role="super_admin",
+        ) or existing
+    return repo.create_user(username=username, password_hash=password_hash, role="super_admin")
 
 
 def seed_admin_from_settings() -> Dict[str, Any]:

@@ -222,6 +222,7 @@ def query_classify(state: KnowledgeAgentState) -> dict:
                 max_tokens=QUERY_CLASSIFY_MAX_TOKENS,
                 timeout=QUERY_CLASSIFY_TIMEOUT_SECONDS,
                 max_retries=QUERY_CLASSIFY_MAX_RETRIES,
+                disable_thinking=True,
             ).strip().lower()
         except Exception as exc:
             logger.warning("[QueryClassify] LLM 调用失败，默认 multi_doc: %s", exc)

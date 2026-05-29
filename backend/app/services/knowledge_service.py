@@ -18,8 +18,10 @@ from app.services.service_ticket_service import (
     INTENT_OPERATION,
     analyze_operation_workflow_with_llm,
     classify_ticket_intent_with_llm,
+    load_ticket_history_context,
     process_ticket_clarification_turn,
     record_ai_resolved_ticket,
+    record_unanswered_normal_ticket,
     should_start_missing_knowledge_flow,
 )
 
@@ -137,6 +139,19 @@ def _should_record_ai_resolved_ticket(result: Dict[str, Any]) -> bool:
     return True
 
 
+def _should_record_unanswered_normal_ticket(result: Dict[str, Any], decision: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(result, dict) or not isinstance(decision, dict):
+        return False
+    if not should_start_missing_knowledge_flow(result):
+        return False
+    if not (result.get("answer") or "").strip():
+        return False
+    return (
+        str(decision.get("intent_class") or "").upper() == "D"
+        and not bool(decision.get("needs_ticket_flow"))
+    )
+
+
 def _is_pre_rag_ticket_decision(decision: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(decision, dict) or not decision.get("needs_ticket_flow"):
         return False
@@ -164,6 +179,9 @@ def persist_clarification_message(
     rag_result: Optional[Dict[str, Any]] = None,
     has_image: bool = False,
     query_image_oss_key: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     from app.db import get_conversation_repository
     from app.services import service_ticket_service
@@ -211,6 +229,9 @@ def persist_clarification_message(
         rag_result=rag_result,
         has_image=has_image,
         query_image_oss_key=query_image_oss_key,
+        entry_user_id=entry_user_id,
+        entry_user_name=entry_user_name,
+        entry_source=entry_source,
     )
 
 
@@ -416,12 +437,16 @@ async def stream_knowledge_qa_sse(
     keyword_filter: Optional[str] = None,
     query_image_url: Optional[str] = None,
     query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[list[str]] = None,
     convert_missing_knowledge_to_ticket: bool = False,
     user_id: Optional[str] = None,
     user_name: Optional[str] = None,
     channel: str = "web",
     sender_id: Optional[str] = None,
     requester_name: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
     pre_rag_ticket_decision_task: Optional[asyncio.Task] = None,
 ) -> AsyncIterator[str]:
     """
@@ -532,6 +557,10 @@ async def stream_knowledge_qa_sse(
                 rag_result=rag_result_for_ticket,
                 has_image=bool(query_image_url or query_image_oss_key),
                 query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+                entry_user_id=entry_user_id,
+                entry_user_name=entry_user_name,
+                entry_source=entry_source,
             )
             if ticket_result:
                 yield _sse(
@@ -623,14 +652,16 @@ async def stream_knowledge_qa_sse(
 
     done_payload = normal_done_payload
     converted_to_ticket = False
+    missing_decision = None
     if convert_missing_knowledge_to_ticket and should_start_missing_knowledge_flow(rag_result):
         try:
             decision = classify_ticket_intent_with_llm(
                 query=query,
-                history=[],
+                history=load_ticket_history_context(session_id, limit=8),
                 has_image=bool(query_image_url or query_image_oss_key),
                 rag_result=rag_result,
             )
+            missing_decision = decision
             if decision.get("intent_class") == INTENT_MISSING_KNOWLEDGE and decision.get("needs_ticket_flow"):
                 ticket_result = process_ticket_clarification_turn(
                     session_id=session_id,
@@ -645,6 +676,10 @@ async def stream_knowledge_qa_sse(
                     rag_result=rag_result,
                     has_image=bool(query_image_url or query_image_oss_key),
                     query_image_oss_key=query_image_oss_key,
+                    query_image_oss_keys=query_image_oss_keys,
+                    entry_user_id=entry_user_id,
+                    entry_user_name=entry_user_name,
+                    entry_source=entry_source,
                 )
                 if ticket_result:
                     converted_to_ticket = True
@@ -661,8 +696,8 @@ async def stream_knowledge_qa_sse(
                             "ticket_intent": decision,
                         },
                         "image_map": final.get("image_map") or ctx.get("image_map") or {},
-                        "finish_reason": ticket_result.get("finish_reason") or "clarification",
-                    }
+                            "finish_reason": ticket_result.get("finish_reason") or "clarification",
+                        }
         except Exception as exc:
             logger.warning("stream missing-knowledge ticket conversion failed: %s", exc)
 
@@ -697,8 +732,34 @@ async def stream_knowledge_qa_sse(
                     channel=channel or "web",
                     sender_id=sender_id,
                     requester_name=requester_name,
+                    entry_user_id=entry_user_id,
+                    entry_user_name=entry_user_name,
+                    entry_source=entry_source,
                     has_image=bool(query_image_url or query_image_oss_key),
                     query_image_oss_key=query_image_oss_key,
                 )
             except Exception as exc:
                 logger.warning("stream resolved-ai ticket record failed: %s", exc)
+        elif _should_record_unanswered_normal_ticket(rag_result, missing_decision):
+            try:
+                record_unanswered_normal_ticket(
+                    session_id=session_id,
+                    user_id=user_id or "guest_default",
+                    user_name=user_name,
+                    kb_name=collection,
+                    query=query,
+                    answer=answer_final,
+                    confidence=final.get("confidence"),
+                    rag_result=rag_result,
+                    channel=channel or "web",
+                    sender_id=sender_id,
+                    requester_name=requester_name,
+                    entry_user_id=entry_user_id,
+                    entry_user_name=entry_user_name,
+                    entry_source=entry_source,
+                    has_image=bool(query_image_url or query_image_oss_key),
+                    query_image_oss_key=query_image_oss_key,
+                    query_image_oss_keys=query_image_oss_keys,
+                )
+            except Exception as exc:
+                logger.warning("stream unanswered-normal ticket record failed: %s", exc)

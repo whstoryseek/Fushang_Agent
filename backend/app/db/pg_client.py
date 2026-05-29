@@ -4,6 +4,7 @@ PostgreSQL 连接池
 提供参数化查询，彻底避免 SQL 注入
 """
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -90,6 +91,21 @@ def execute_many(sql: str, params_list: List[Tuple]) -> None:
     try:
         with conn.cursor() as cur:
             cur.executemany(sql, params_list)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+@contextmanager
+def transaction():
+    """获取一个事务连接，调用方负责在上下文内执行多条语句。"""
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        yield conn
         conn.commit()
     except Exception:
         conn.rollback()

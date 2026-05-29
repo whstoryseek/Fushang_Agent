@@ -13,8 +13,14 @@ INTENT_OPERATION = "A"
 INTENT_MISSING_KNOWLEDGE = "B"
 INTENT_AMBIGUOUS = "C"
 INTENT_NORMAL = "D"
+STATUS_UNANSWERED_NORMAL = "unanswered_normal"
 
 CLASSIFIER_MODEL = getattr(settings, "operation_classifier_model", "doubao-seed-2-0-mini-260428")
+IMAGE_FIELD_ANALYSIS_MODEL = getattr(
+    settings,
+    "operation_image_analysis_model",
+    getattr(settings, "default_model", "doubao-seed-2-0-pro-260215"),
+)
 CLASSIFIER_MAX_TOKENS = 300
 CLASSIFIER_TIMEOUT = min(max(float(getattr(settings, "operation_classifier_timeout", 4.0)), 2.5), 4.0)
 CLASSIFIER_REVIEW_MAX_TOKENS = 320
@@ -25,6 +31,8 @@ WORKFLOW_ANALYSIS_TIMEOUT = min(
     6.0,
 )
 CLARIFICATION_REPLY_MAX_TOKENS = 500
+IMAGE_FIELD_ANALYSIS_MAX_TOKENS = 700
+IMAGE_FIELD_ANALYSIS_TIMEOUT = min(CLASSIFIER_TIMEOUT, 4.0)
 CHAT_HISTORY_LIMIT = 50
 
 _VALID_INTENTS = {
@@ -195,6 +203,7 @@ def _classifier_prompt(
             "fallback_reason": rag_result.get("fallback_reason"),
             "quality_passed": rag_result.get("quality_passed"),
             "quality_level": rag_result.get("quality_level"),
+            "answer_preview": str(rag_result.get("answer") or "")[:500],
             "source_count": len(sources) if isinstance(sources, list) else 0,
         }
 
@@ -205,38 +214,72 @@ def _classifier_prompt(
 你是售后/服务工单意图分类器。只输出一个 JSON 对象，不要输出 Markdown。
 
 核心目标：
-1. 先保护 RAG：只要用户问题已经包含明确业务对象/系统名 + 现象/报错/提示语，就不是 C，预 RAG 阶段必须判 D，让 RAG 正常检索回答。
-2. 只有 RAG 结果明确证明知识库未覆盖时，才允许把 D 转成 B。
-3. 不允许把普通咨询、教程问题、已有完整报错的问题提前拉入工单。
+1. 优先保护 RAG。只要用户已经把“想问什么”说清楚，就先判 D，让 RAG 正常检索。
+2. 只在确需人工介入时才进入工单，避免把普通咨询、教程问题、已有完整报错的问题误送工单。
+3. RAG 后也不能仅因为 rag_result.used_fallback=true 就转 B；只有答案确实无效、且必须继续向用户收集现场信息时，才允许转 B。
 
-分类定义：
-A=操作代办类。用户明确要求系统或人工替他执行具体业务动作，例如“帮我开通/关闭/修改/绑定/解绑/处理/提交/恢复/配置权限”。A 必须同时满足：有具体动作对象；用户是在请求代办/处理，而不是单纯询问教程或原因。
-B=知识库未覆盖。仅当本轮输入提供 rag_result，且 rag_result 明确显示 used_fallback=true 并证明知识库无相关内容时，才可判 B。
-C=语义不明。仅限“这个怎么弄”“不行”“见图”“帮看看”“报错了”但没有系统/业务对象、没有完整报错、没有场景的信息残缺表达，或仅图片/截图。
-D=常规知识问答。用户问原因、怎么办、如何操作、教程、步骤、功能用途、在哪里看、为什么、能不能，或给出了完整报错希望解释/解决，均先判 D，让 RAG 检索。
+判定顺序：
+步骤1：先判断是否“语义清晰”。
+- 只要 query 已经包含以下任意两类信息，就视为语义清晰，不得判 C：
+  1) 业务对象/系统名/功能名；
+  2) 现象/报错/提示语；
+  3) 目标动作或咨询点，例如“怎么开通”“为什么失败”“怎么办”“在哪里看”“是否支持”。
+- 完整问句但缺少账号、门店、订单号、手机号、截图，不算 C。这些是后续工单补充字段，不是前门分类条件。
+- 前门分类只看“用户是否已经把问题说清楚”，不看“线下办理字段是否收齐”。
+
+步骤2：判断 A。
+- A=操作代办类。只有用户明确要求系统或人工替他执行具体业务动作，才是 A，例如“帮我开通/关闭/修改/绑定/解绑/处理/提交/恢复/配置权限”。
+- A 必须同时满足：有具体动作对象；用户是在请求代办/处理。
+- 问教程、步骤、原因、用途、位置、条件，不是 A，优先判 D。
+
+步骤3：判断 B。
+- B=知识库未覆盖。仅当本轮输入提供 rag_result，且 rag_result 明确显示 used_fallback=true，同时 answer_preview 没有给出可用解释/排查方向，并且必须继续向用户收集现场信息时，才可判 B。
+- 不能仅因为 rag_result.used_fallback=true、quality 低、source 少，就直接判 B。
+
+步骤4：判断 D。
+- D=常规知识问答。用户问原因、怎么办、如何解决、如何操作、教程、步骤、功能用途、在哪里看、为什么、能不能，或已经给出完整报错希望解释/解决，均优先判 D。
+- 只要 query 自身已经足够让 RAG 去检索，就判 D，不要先追问。
+
+步骤5：判断 C。
+- C=语义不明。仅限“这个怎么弄”“不行”“见图”“帮看看”“报错了”这类真正残缺表达：没有系统/业务对象、没有完整报错、没有场景，或者仅图片/截图。
+- 在输出 C 前必须先自检：query 是否已经包含业务对象 + 现象/报错，或业务对象 + 目标动作/咨询点；如果是，就不能判 C。
 
 强制边界：
+- 最高优先级：下列“保护型常规问答”优先级高于 rag_result.used_fallback、fallback_reason、answer_preview。即使 answer_preview 是“当前知识库暂未找到相关信息，无法解答”，也必须判 D，needs_ticket_flow=false，question=""，不得前台工单追问。
 - “企业微信发不了红包，提示该单已被其他账号发起支付，你无权再发起”
   - 如果 rag_result 为 null：必须判 D，needs_ticket_flow=false，question=""。
-  - 如果 rag_result 证明知识库未覆盖：判 B，question 必须追问“请补充发生入口、涉及账号/门店、截图，以及影响范围（单个账号还是多名用户）。”
+  - 如果 rag_result 证明知识库未覆盖：仍判 D，不在前台追问。
+- 以下问题及其类似问题在 rag_result 为 null 时都必须判 D，needs_ticket_flow=false，question=""，先交给 RAG：
+  - “企业微信无法发视频是什么原因？”
+  - “企业微信登录时提示之前加入企业后退出，还在企业通讯录内，需联系管理员删除后再加入确定”
+  - “客户积分一直在扣是什么原因？”
+  - “新活动政策刷新后没有是什么原因？”
+  - “富友账户有钱，但下单时显示余额不足怎么办？”
+- 上面这些问题即使 rag_result.used_fallback=true，也不能直接进入前台工单追问；除非用户明确要求人工处理，否则仍判 D。
+- 问“是什么原因”“怎么办”“如何解决”不是 A，也不是 C；只要有明确业务对象和现象，默认判 D。
 - “这个报错怎么处理”=>C，因为缺少系统/业务对象和报错原文。
 - “微信子商户号怎么开通”=>D，因为用户只是问教程。
 - “帮我开通微信子商户号”=>A，因为用户要求代办开通。
 - “如何开通 XX 权限”=>D，除非用户明确说“帮我开通”。
+
+输出前自检：
+1. 在判 A 前先问自己：用户是在让我替他做，还是在问怎么做？如果是问怎么做，判 D。
+2. 在判 B 前先问自己：是否真的已经看到 rag_result 证明知识库未覆盖且答案没有有效方向？如果没有，不能判 B。
+3. 在判 C 前先问自己：用户是否已经把问题说清楚？如果 query 已有业务对象 + 现象/报错/咨询点，就不能判 C。
 
 question 输出自检：
 1. D 的 question 必须为空字符串。
 2. A/B/C 的 question 必须是下一轮要问用户的中文问题。
 3. question 严禁复制、改写、复述 query。
 4. question 严禁使用空泛问法：“您具体遇到了什么问题”“请描述操作需求”“请补充需求信息”“请补充遇到的问题”。
-5. 如果 query 已有报错/提示语，question 必须索要具体缺失信息，至少覆盖三项：发生入口、账号/门店、截图、影响范围、订单/红包类型。
+5. 如果 query 已有报错/提示语且确实需要进入 A/B/C，question 必须索要真实缺失信息，优先追问发生入口、涉及账号/门店、截图、影响范围、订单/红包类型等具体字段。
 
 输出固定字段（字段名不要翻译）必须包含：
 intent_class, reason, needs_ticket_flow, confidence, fields, missing_fields, question, rationale_brief
 
 字段要求：
 fields 必须是对象；missing_fields 必须是字符串数组；confidence 是 0 到 1。
-A/C 的 needs_ticket_flow=true；D 的 needs_ticket_flow=false；B 是否 true 取决于 rag_result 是否证明未覆盖。
+A/C 的 needs_ticket_flow=true；D 的 needs_ticket_flow=false；B 是否 true 取决于 rag_result 是否证明未覆盖且确实需要前台追问收集信息。
 """,
         },
         {
@@ -265,19 +308,32 @@ def _classifier_review_prompt(
         {
             "role": "system",
             "content": """
-你是 RAG 前置拦截二审模型。只输出 JSON，不要输出 Markdown。
+你是 RAG/工单流转二审模型。只输出 JSON，不要输出 Markdown。
 
-你只判断一个问题：候选分类是否应该在 RAG 之前拦截用户问题进入工单追问。
+你只判断一个问题：候选分类是否应该在 RAG 之前拦截，或在 RAG 之后把用户问题转入前台工单追问。
 
 默认动作是“放行RAG”。只有以下情况才“进入工单流”：
 1. 用户明确请求人工/系统代办具体动作，例如“帮我开通/处理/修改/绑定/解绑/配置/恢复”。
 2. 用户表达真正残缺，例如“这个怎么弄”“不行”“见图”“帮看看”“报错了”，缺少系统名、业务对象或报错原文。
 3. 仅图片/截图且文本无法判断。
+4. RAG 后答案明确无法回答，并且必须向用户补充收集现场信息才能创建工单。
 
 必须“放行RAG”的情况：
+0. 最高优先级：下列示例及语义相同的问题，必须“放行RAG”，这条优先级高于 candidate_decision、rag_result.used_fallback、fallback_reason 和 answer_preview。即使知识库暂未找到相关信息，也不得让用户进入前台工单追问。
 1. query 已包含明确业务对象/系统名 + 现象/报错/提示语。
-2. query 是询问原因、怎么办、如何解决、如何操作、教程、步骤、为什么、能不能。
-3. query 示例：“企业微信发不了红包，提示该单已被其他账号发起支付，你无权再发起”。
+2. query 已包含明确业务对象/系统名 + 目标动作或咨询点，例如“怎么开通”“怎么办”“为什么失败”“在哪里看”“是否支持”。
+3. query 是询问原因、怎么办、如何解决、如何操作、教程、步骤、为什么、能不能。
+4. query 虽然缺少账号、门店、订单号、手机号、截图，但这不影响它已经是一个完整问句。缺少这些字段，不得作为拦成 C/B 的理由。
+5. 只要 query 自身已经足够让 RAG 检索，就放行RAG，不要因为字段未收齐而拦截。
+6. query 示例：“企业微信发不了红包，提示该单已被其他账号发起支付，你无权再发起”。
+7. query 示例：“企业微信无法发视频是什么原因？”“客户积分一直在扣是什么原因？”“富友账户有钱，但下单时显示余额不足怎么办？”“新活动政策刷新后没有是什么原因？”。
+8. query 示例：“企业微信登录时提示之前加入企业后退出，还在企业通讯录内，需联系管理员删除后再加入确定”。
+9. 即使 rag_result.used_fallback=true，上述清楚的原因/怎么办/报错排查类问题也必须放行，不要前台追问；除非用户明确要求人工处理。
+
+输出前自检：
+1. 如果 candidate_decision 是 C，请先确认 query 是否真的缺少业务对象、现象/报错、咨询点；如果没有缺，就改为“放行RAG”。
+2. 如果 candidate_decision 是 B，请先确认 rag_result 是否真的证明“知识库无覆盖且答案无有效方向”；如果没有证据，就改为“放行RAG”。
+3. 如果 query 的核心是在问“怎么做/为什么/怎么办”，而不是“帮我做”，就改为“放行RAG”。
 
 输出固定字段，字段名保持 action、reason、question：
 action：填“放行RAG”或“进入工单流”
@@ -300,6 +356,20 @@ question：如果 action 为“进入工单流”，给出面向用户的下一�
             ),
         },
     ]
+
+
+def _review_fail_open_decision(candidate: Dict[str, Any], reason: str = "llm_review_failed_allow_rag") -> Dict[str, Any]:
+    return {
+        "intent_class": INTENT_NORMAL,
+        "reason": reason,
+        "needs_ticket_flow": False,
+        "confidence": candidate.get("confidence") or 0.0,
+        "fields": {},
+        "missing_fields": [],
+        "question": "",
+        "rationale_brief": "二审模型失败，文本问题默认放行 RAG，避免误拦截",
+        "source": "llm_review_fallback",
+    }
 
 
 def _review_ticket_decision_with_llm(
@@ -341,9 +411,14 @@ def _review_ticket_decision_with_llm(
                 reviewed["question"] = question
             reviewed["source"] = "llm_review"
             return reviewed
+        if str(candidate.get("intent_class") or "").upper() in {INTENT_AMBIGUOUS, INTENT_MISSING_KNOWLEDGE} and not has_image:
+            logger.warning("ticket intent classifier review returned unknown action: %s", action)
+            return _review_fail_open_decision(candidate, reason="llm_review_invalid_action_allow_rag")
         return candidate
     except Exception as exc:
         logger.warning("ticket intent classifier review failed: %s", exc)
+        if str(candidate.get("intent_class") or "").upper() in {INTENT_AMBIGUOUS, INTENT_MISSING_KNOWLEDGE} and not has_image:
+            return _review_fail_open_decision(candidate)
         return candidate
 
 
@@ -364,7 +439,12 @@ def classify_ticket_intent_with_llm(
         )
         payload = _extract_json_payload(text)
         decision = _normalize_payload(payload, query, has_image, rag_result)
-        if decision.get("source") == "llm" and decision.get("intent_class") == INTENT_AMBIGUOUS and not has_image:
+        if (
+            decision.get("source") == "llm"
+            and decision.get("intent_class") in {INTENT_AMBIGUOUS, INTENT_MISSING_KNOWLEDGE}
+            and decision.get("needs_ticket_flow")
+            and not has_image
+        ):
             return _review_ticket_decision_with_llm(
                 query=query,
                 history=history,
@@ -606,9 +686,11 @@ def _clarification_reply_prompt(
     has_image: bool,
 ) -> List[Dict[str, Any]]:
     clarification = _active_ticket_clarification(active_ticket)
-    chat_history = _existing_chat_history(clarification.get("chat_history"))
-    if not chat_history:
-        chat_history = _chat_history_from_turns(clarification.get("turns"))
+    chat_history = load_ticket_history_context(
+        str(active_ticket.get("session_id") or ""),
+        active_ticket=active_ticket,
+        limit=8,
+    )
     payload = {
         "current_user_reply": query or "",
         "has_image": bool(has_image),
@@ -636,6 +718,8 @@ def _clarification_reply_prompt(
                 "如果用户明确表示不知道、不想回答、无法提供，将固定字段 user_refused 和 ready_for_manual 都设为 true。"
                 "如果信息已经足够交给人工处理，将固定字段 ready_for_manual 设为 true。"
                 "如果澄清后已经是普通知识库咨询，将固定字段 intent_class 设为 D、needs_ticket_flow 设为 false，并给出 resolved_query。"
+                "不要因为仍然缺少账号、门店、订单号、截图，就阻止转成 D；如果最新回复 + 原问题 + 历史对话已经能组成完整问句，就应转成 D。"
+                "完整问句的标准是：已经能看出业务对象/系统名，以及现象、报错、目标动作或咨询点中的至少一项。"
                 "A/D 边界继续严格：教程、怎么、如何、有什么用、在哪里看、为什么等咨询不是 A，除非用户要求代办具体动作。"
                 "输出固定字段（字段名不要翻译）必须包含 intent_class, needs_ticket_flow, confidence, fields, missing_fields, question, "
                 "ready_for_manual, user_refused, resolved_query, rationale_brief。"
@@ -697,6 +781,229 @@ def analyze_clarification_reply_with_llm(
     except Exception as exc:
         logger.warning("clarification reply analyzer failed: %s", exc)
         return _clarification_reply_default(query, active_ticket, has_image)
+
+
+def _image_field_default(reason: str = "image_field_analysis_failed") -> Dict[str, Any]:
+    return {
+        "fields": {},
+        "document_types": [],
+        "image_summary": "",
+        "rationale_brief": reason,
+        "source": "fallback",
+    }
+
+
+def _ticket_image_field_prompt(
+    *,
+    query: str,
+    active_ticket: Dict[str, Any],
+    image_url: Optional[str] = None,
+    image_urls: Optional[List[str]] = None,
+    query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    clarification = _active_ticket_clarification(active_ticket)
+    normalized_image_urls = [url for url in (image_urls or []) if str(url or "").strip()]
+    if image_url and image_url not in normalized_image_urls:
+        normalized_image_urls.insert(0, image_url)
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
+    payload = {
+        "current_user_reply": query or "",
+        "image_oss_key": query_image_oss_key,
+        "image_oss_keys": normalized_oss_keys,
+        "image_count": len(normalized_image_urls),
+        "active_ticket": {
+            "intent_class": clarification.get("intent_class"),
+            "original_query": clarification.get("original_query"),
+            "required_fields": _as_list(clarification.get("required_fields")),
+            "required_field_details": _as_list(clarification.get("required_field_details")),
+            "missing_fields": _as_list(clarification.get("missing_fields")),
+            "collected": clarification.get("collected") if isinstance(clarification.get("collected"), dict) else {},
+            "workflow_summary": clarification.get("workflow_summary") or "",
+        },
+    }
+    user_content: List[Dict[str, Any]] = [{"text": json.dumps(payload, ensure_ascii=False)}]
+    user_content.extend({"image": url} for url in normalized_image_urls)
+    return [
+        {
+            "role": "system",
+            "content": """
+你是工单图片资料识别助手。请读取用户上传的图片，判断它是否能补齐当前工单缺失字段。
+只输出一个 JSON 对象，不要输出 Markdown，不要解释过程。字段名不要翻译。
+
+识别原则：
+1. 只填图片中能明确看出或读出的字段，禁止根据缺失字段名称猜测。
+2. 对营业执照、法人身份证、法人授权书/授权函/授权委托书、银行卡/基本存款账户这类资料图片，如果能明确判断图片类型，即使部分号码看不清，也可以把对应资料字段标记为已上传图片。
+3. 对手机号、邮箱、账号、开户行、银行卡号等文本字段，只有图片中可读时才抽取具体值。
+4. 如果图片与缺失字段无关，fields 返回空对象。
+5. active_ticket.required_field_details 会给出字段中文含义和收集原因，你需要优先根据这些中文说明判断图片对应哪个缺失字段，而不是只看英文 key。
+6. 如果你识别出图片是“法人授权材料”等资料，并且 required_field_details 或 missing_fields 中存在语义对应字段，请直接把该字段填入 fields，不要只写 document_type。
+
+输出固定字段：
+fields, document_types, image_summary, rationale_brief
+
+fields 是对象，key 必须从 active_ticket.required_fields 或 active_ticket.missing_fields 中选择。
+每个字段 value 使用对象，建议包含：
+value, document_type, confidence, extracted
+其中 confidence 是 0 到 1；extracted 放可读出的结构化信息。
+""",
+        },
+        {
+            "role": "user",
+            "content": user_content,
+        },
+    ]
+
+
+def _allowed_image_fields(active_ticket: Dict[str, Any]) -> set:
+    clarification = _active_ticket_clarification(active_ticket)
+    fields = set()
+    for field in _as_list(clarification.get("required_fields")) + _as_list(clarification.get("missing_fields")):
+        key = str(field or "").strip()
+        if key:
+            fields.add(key)
+    return fields
+
+
+def _normalize_image_field_value(
+    value: Any,
+    *,
+    query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    if value in (None, "", [], {}):
+        return None
+    if isinstance(value, dict):
+        normalized = {str(k): v for k, v in value.items() if v not in (None, "", [], {})}
+    else:
+        normalized = {"value": str(value)}
+    if not normalized.get("value"):
+        normalized["value"] = "已上传图片资料"
+    normalized["source"] = "image"
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
+    if query_image_oss_key:
+        normalized["oss_key"] = query_image_oss_key
+    if normalized_oss_keys:
+        normalized["oss_keys"] = normalized_oss_keys
+    if "confidence" in normalized:
+        normalized["confidence"] = _as_float(normalized.get("confidence"))
+    return normalized
+
+
+def _normalize_image_field_payload(
+    payload: Dict[str, Any],
+    *,
+    active_ticket: Dict[str, Any],
+    query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    raw_fields = payload.get("fields") if isinstance(payload, dict) else {}
+    raw_fields = raw_fields if isinstance(raw_fields, dict) else {}
+    allowed = _allowed_image_fields(active_ticket)
+    fields: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_fields.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if allowed and key not in allowed:
+            continue
+        normalized_value = _normalize_image_field_value(
+            raw_value,
+            query_image_oss_key=query_image_oss_key,
+            query_image_oss_keys=query_image_oss_keys,
+        )
+        if normalized_value:
+            fields[key] = normalized_value
+
+    document_types = payload.get("document_types") if isinstance(payload, dict) else []
+    return {
+        "fields": fields,
+        "document_types": document_types if isinstance(document_types, list) else [],
+        "image_summary": str(payload.get("image_summary") or "") if isinstance(payload, dict) else "",
+        "rationale_brief": str(payload.get("rationale_brief") or "") if isinstance(payload, dict) else "",
+        "source": "llm",
+    }
+
+
+def analyze_ticket_image_fields_with_llm(
+    *,
+    query: str,
+    active_ticket: Dict[str, Any],
+    image_url: Optional[str] = None,
+    image_urls: Optional[List[str]] = None,
+    query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    normalized_image_urls = [url for url in (image_urls or []) if str(url or "").strip()]
+    if image_url and image_url not in normalized_image_urls:
+        normalized_image_urls.insert(0, image_url)
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
+    if not normalized_image_urls:
+        return _image_field_default("no_image_url")
+    try:
+        text = get_llm_service().chat_with_images(
+            _ticket_image_field_prompt(
+                query=query,
+                active_ticket=active_ticket,
+                image_url=normalized_image_urls[0],
+                image_urls=normalized_image_urls,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=normalized_oss_keys,
+            ),
+            model=IMAGE_FIELD_ANALYSIS_MODEL,
+            temperature=0.0,
+            max_tokens=IMAGE_FIELD_ANALYSIS_MAX_TOKENS,
+            timeout=IMAGE_FIELD_ANALYSIS_TIMEOUT,
+            max_retries=0,
+            disable_thinking=True,
+        )
+        payload = _extract_json_payload(text)
+        return _normalize_image_field_payload(
+            payload,
+            active_ticket=active_ticket,
+            query_image_oss_key=query_image_oss_key,
+            query_image_oss_keys=normalized_oss_keys,
+        )
+    except Exception as exc:
+        logger.warning("ticket image field analyzer failed: %s", exc)
+        return _image_field_default()
+
+
+def merge_ticket_image_analysis_into_decision(
+    decision: Dict[str, Any],
+    image_analysis: Optional[Dict[str, Any]],
+    active_ticket: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(image_analysis, dict) or not isinstance(image_analysis.get("fields"), dict) or not image_analysis["fields"]:
+        return decision
+
+    merged = dict(decision or {})
+    decision_fields = merged.get("fields") if isinstance(merged.get("fields"), dict) else {}
+    fields = {**decision_fields, **image_analysis["fields"]}
+    merged["fields"] = fields
+    merged["image_analysis"] = image_analysis
+
+    clarification = _active_ticket_clarification(active_ticket)
+    active_intent = str(clarification.get("intent_class") or "").upper()
+    if active_intent in _VALID_INTENTS and active_intent != INTENT_NORMAL:
+        merged["intent_class"] = active_intent
+        merged["needs_ticket_flow"] = True
+
+    required_fields = _as_list(clarification.get("required_fields")) or _as_list(merged.get("missing_fields"))
+    collected = dict(clarification.get("collected") if isinstance(clarification.get("collected"), dict) else {})
+    collected.update(fields)
+    if required_fields:
+        missing_fields = _collected_missing_fields(required_fields, collected)
+        merged["missing_fields"] = missing_fields
+        if not missing_fields:
+            merged["question"] = ""
+    return merged
 
 
 MAX_CLARIFICATION_ROUNDS = {
@@ -861,54 +1168,177 @@ def resolve_active_clarification_with_rag(
     rag_result: Optional[Dict[str, Any]] = None,
     has_image: bool = False,
     query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[List[str]] = None,
     sender_id: Optional[str] = None,
     requester_name: Optional[str] = None,
     user_name: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(active_ticket, dict) or not active_ticket.get("id"):
         return None
 
-    existing = _active_ticket_clarification(active_ticket)
-    turns = list(existing.get("turns") or [])
-    round_no = max(int(active_ticket.get("clarification_round") or 0), len(turns)) + 1
-    turns.append(
-        {
-            "round": round_no,
-            "query": query or "",
-            "answer": answer or "",
-            "status": "resolved_ai",
-            "image_key": query_image_oss_key,
+    repo = get_service_ticket_repository()
+    locked_user_id = _normal_ticket_user_id(active_ticket.get("user_id"))
+    locked_session_id = str(active_ticket.get("session_id") or "")
+    locked_kb_name = active_ticket.get("kb_name")
+
+    def _run(active: Optional[Dict[str, Any]], conn) -> Optional[Dict[str, Any]]:
+        if not isinstance(active, dict) or not active.get("id"):
+            return None
+
+        existing = _active_ticket_clarification(active)
+        turns = list(existing.get("turns") or [])
+        round_no = max(int(active.get("clarification_round") or 0), len(turns)) + 1
+        turns.append(
+            {
+                "round": round_no,
+                "query": query or "",
+                "answer": answer or "",
+                "status": "resolved_ai",
+                "image_key": query_image_oss_key,
+            }
+        )
+        clarification = {
+            **existing,
+            "turns": turns,
+            "chat_history": _build_ticket_chat_history(
+                session_id=locked_session_id,
+                existing=existing,
+                query=query,
+                answer=answer,
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            ),
+            "kb_result": rag_result if isinstance(rag_result, dict) else existing.get("kb_result") or {},
+            "completion_status": COMPLETION_COMPLETE,
+            "exit_reason": "resolved_by_rag",
+            "ready_for_manual": False,
+            "image_analysis": _merged_ticket_image_analysis(
+                existing,
+                {},
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            ),
         }
+        ticket = repo.update_clarification(
+            active["id"],
+            status="resolved_ai",
+            answer=answer or "",
+            clarification_round=round_no,
+            clarification=clarification,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+            conn=conn,
+        )
+        context_snapshots = _ticket_contexts_from_rag_result(rag_result)
+        if context_snapshots:
+            repo.replace_contexts(active["id"], context_snapshots, conn=conn)
+        return ticket
+
+    return repo.run_clarification_transaction(
+        session_id=locked_session_id,
+        user_id=locked_user_id,
+        kb_name=locked_kb_name,
+        callback=_run,
     )
-    clarification = {
-        **existing,
-        "turns": turns,
-        "chat_history": _build_ticket_chat_history(
-            session_id=str(active_ticket.get("session_id") or ""),
-            existing=existing,
-            query=query,
-            answer=answer,
-            has_image=has_image,
-            query_image_oss_key=query_image_oss_key,
-        ),
-        "kb_result": rag_result if isinstance(rag_result, dict) else existing.get("kb_result") or {},
-        "completion_status": COMPLETION_COMPLETE,
-        "exit_reason": "resolved_by_rag",
-        "ready_for_manual": False,
-    }
-    ticket = get_service_ticket_repository().update_clarification(
-        active_ticket["id"],
-        status="resolved_ai",
-        answer=answer or "",
-        clarification_round=round_no,
-        clarification=clarification,
-        sender_id=sender_id,
-        requester_name=requester_name or user_name,
+
+
+def resolve_active_clarification_as_unanswered_normal(
+    *,
+    active_ticket: Dict[str, Any],
+    query: str,
+    answer: str,
+    rag_result: Optional[Dict[str, Any]] = None,
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[List[str]] = None,
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    user_name: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(active_ticket, dict) or not active_ticket.get("id"):
+        return None
+
+    repo = get_service_ticket_repository()
+    locked_user_id = _normal_ticket_user_id(active_ticket.get("user_id"))
+    locked_session_id = str(active_ticket.get("session_id") or "")
+    locked_kb_name = active_ticket.get("kb_name")
+
+    def _run(active: Optional[Dict[str, Any]], conn) -> Optional[Dict[str, Any]]:
+        if not isinstance(active, dict) or not active.get("id"):
+            return None
+
+        existing = _active_ticket_clarification(active)
+        turns = list(existing.get("turns") or [])
+        round_no = max(int(active.get("clarification_round") or 0), len(turns)) + 1
+        normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+        if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+            normalized_oss_keys.insert(0, query_image_oss_key)
+        turns.append(
+            {
+                "round": round_no,
+                "query": query or "",
+                "answer": answer or "",
+                "status": STATUS_UNANSWERED_NORMAL,
+                "image_key": normalized_oss_keys[0] if normalized_oss_keys else query_image_oss_key,
+                "image_keys": normalized_oss_keys,
+            }
+        )
+        clarification = {
+            **existing,
+            "intent_class": INTENT_NORMAL,
+            "reason": "unanswered_normal_after_rag_fallback",
+            "missing_fields": [],
+            "turns": turns,
+            "chat_history": _build_ticket_chat_history(
+                session_id=locked_session_id,
+                existing=existing,
+                query=query,
+                answer=answer,
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            ),
+            "kb_result": rag_result if isinstance(rag_result, dict) else existing.get("kb_result") or {},
+            "completion_status": COMPLETION_COMPLETE,
+            "exit_reason": "returned_to_rag_but_unanswered",
+            "ready_for_manual": False,
+            "image_analysis": _merged_ticket_image_analysis(
+                existing,
+                {},
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            ),
+        }
+        ticket = repo.update_clarification(
+            active["id"],
+            status=STATUS_UNANSWERED_NORMAL,
+            answer=answer or "",
+            clarification_round=round_no,
+            clarification=clarification,
+            sender_id=sender_id,
+            requester_name=requester_name or user_name,
+            conn=conn,
+        )
+        context_snapshots = _ticket_contexts_from_rag_result(rag_result)
+        if context_snapshots:
+            repo.replace_contexts(active["id"], context_snapshots, conn=conn)
+        return ticket
+
+    return repo.run_clarification_transaction(
+        session_id=locked_session_id,
+        user_id=locked_user_id,
+        kb_name=locked_kb_name,
+        callback=_run,
     )
-    context_snapshots = _ticket_contexts_from_rag_result(rag_result)
-    if context_snapshots:
-        get_service_ticket_repository().replace_contexts(active_ticket["id"], context_snapshots)
-    return ticket
 
 
 def record_ai_resolved_ticket(
@@ -925,6 +1355,9 @@ def record_ai_resolved_ticket(
     channel: str = "web",
     sender_id: Optional[str] = None,
     requester_name: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
     has_image: bool = False,
     query_image_oss_key: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -936,6 +1369,7 @@ def record_ai_resolved_ticket(
         "reason": "resolved_by_ai",
         "original_query": query or "",
         "required_fields": [],
+        "required_field_details": [],
         "missing_fields": [],
         "collected": {"issue_detail": query or ""},
         "workflow_found": False,
@@ -980,6 +1414,104 @@ def record_ai_resolved_ticket(
         channel=channel or "web",
         sender_id=sender_id,
         requester_name=requester_name or user_name,
+        entry_user_id=entry_user_id,
+        entry_user_name=entry_user_name,
+        entry_source=entry_source,
+        clarification_round=1,
+        clarification=clarification,
+        contexts=_ticket_contexts_from_rag_result(rag_result),
+    )
+
+
+def record_unanswered_normal_ticket(
+    *,
+    session_id: str,
+    user_id: str,
+    user_name: Optional[str] = None,
+    kb_name: Optional[str] = None,
+    query: str,
+    answer: str,
+    confidence: Optional[float] = None,
+    rag_result: Optional[Dict[str, Any]] = None,
+    channel: str = "web",
+    sender_id: Optional[str] = None,
+    requester_name: Optional[str] = None,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
+    has_image: bool = False,
+    query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not (query or "").strip() or not (answer or "").strip():
+        return None
+
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
+    clarification = {
+        "intent_class": INTENT_NORMAL,
+        "reason": "unanswered_normal_after_rag_fallback",
+        "original_query": query or "",
+        "required_fields": [],
+        "required_field_details": [],
+        "missing_fields": [],
+        "collected": {
+            "issue_detail": query or "",
+            "has_image": bool(has_image),
+            "image_keys": normalized_oss_keys,
+        },
+        "workflow_found": False,
+        "workflow_summary": "",
+        "workflow_sources": [],
+        "kb_result": rag_result if isinstance(rag_result, dict) else {},
+        "image_analysis": {
+            "has_image": bool(has_image),
+            "query_image_oss_key": normalized_oss_keys[0] if normalized_oss_keys else query_image_oss_key,
+            "query_image_oss_keys": normalized_oss_keys,
+        },
+        "turns": [
+            {
+                "round": 1,
+                "query": query or "",
+                "answer": answer or "",
+                "status": STATUS_UNANSWERED_NORMAL,
+                "image_key": normalized_oss_keys[0] if normalized_oss_keys else query_image_oss_key,
+                "image_keys": normalized_oss_keys,
+            }
+        ],
+        "chat_history": _build_ticket_chat_history(
+            session_id=session_id,
+            existing={},
+            query=query,
+            answer=answer,
+            has_image=has_image,
+            query_image_oss_key=query_image_oss_key,
+            query_image_oss_keys=query_image_oss_keys,
+        ),
+        "completion_status": COMPLETION_COMPLETE,
+        "exit_reason": "returned_to_rag_but_unanswered",
+        "ready_for_manual": False,
+    }
+    sources = rag_result.get("sources") if isinstance(rag_result, dict) else []
+    return get_service_ticket_repository().create_with_contexts(
+        session_id=session_id,
+        user_id=_normal_ticket_user_id(user_id),
+        user_name=user_name,
+        kb_name=kb_name,
+        query=query,
+        answer=answer,
+        status=STATUS_UNANSWERED_NORMAL,
+        confidence=confidence,
+        fallback_reason=rag_result.get("fallback_reason") if isinstance(rag_result, dict) else None,
+        quality_level=rag_result.get("quality_level") if isinstance(rag_result, dict) else None,
+        sources=sources,
+        channel=channel or "web",
+        sender_id=sender_id,
+        requester_name=requester_name or user_name,
+        entry_user_id=entry_user_id,
+        entry_user_name=entry_user_name,
+        entry_source=entry_source,
         clarification_round=1,
         clarification=clarification,
         contexts=_ticket_contexts_from_rag_result(rag_result),
@@ -988,6 +1520,41 @@ def record_ai_resolved_ticket(
 
 def should_start_missing_knowledge_flow(rag_result: Dict[str, Any]) -> bool:
     return _rag_result_proves_miss(rag_result)
+
+
+def build_forced_missing_knowledge_decision(
+    *,
+    query: str,
+    rag_result: Optional[Dict[str, Any]] = None,
+    prior_decision: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    decision = prior_decision if isinstance(prior_decision, dict) else {}
+    fields = decision.get("fields") if isinstance(decision.get("fields"), dict) else {}
+    collected = dict(fields)
+    issue_detail = str(collected.get("issue_detail") or query or "").strip()
+    if issue_detail:
+        collected["issue_detail"] = issue_detail
+
+    missing_fields = [str(field) for field in (decision.get("missing_fields") or []) if str(field or "").strip()]
+    if "manual_answer" not in missing_fields:
+        missing_fields.append("manual_answer")
+
+    fallback_reason = ""
+    if isinstance(rag_result, dict):
+        fallback_reason = str(rag_result.get("fallback_reason") or "")
+
+    return {
+        "intent_class": INTENT_MISSING_KNOWLEDGE,
+        "reason": "knowledge_base_miss_requires_manual_followup",
+        "needs_ticket_flow": True,
+        "confidence": float(decision.get("confidence") or 0.0),
+        "fields": collected,
+        "missing_fields": missing_fields,
+        "question": "",
+        "ready_for_manual": True,
+        "source": "fallback",
+        "rationale_brief": f"rag_proven_miss:{fallback_reason or 'no_relevant_documents'}",
+    }
 
 
 def _manual_ticket_answer(ticket_id: Optional[str], completion_status: str) -> str:
@@ -1019,6 +1586,13 @@ def _workflow_sources(workflow: Dict[str, Any], existing: Dict[str, Any]) -> Lis
         if isinstance(sources, list):
             return sources
     return _as_list(existing.get("workflow_sources"))
+
+
+def _workflow_required_field_details(workflow: Dict[str, Any], existing: Dict[str, Any]) -> List[Any]:
+    details = workflow.get("required_field_details")
+    if isinstance(details, list):
+        return details
+    return _as_list(existing.get("required_field_details"))
 
 
 def _normal_ticket_user_id(user_id: Optional[str]) -> str:
@@ -1066,6 +1640,62 @@ def _ticket_contexts_from_rag_result(rag_result: Optional[Dict[str, Any]]) -> Li
                 "sort_order": idx,
             }
         )
+
+    backfill_chunk_ids = [
+        context["chunk_id"]
+        for context in contexts
+        if context.get("chunk_id")
+        and (
+            not context.get("file_name")
+            or context.get("chunk_index") is None
+            or not context.get("job_id")
+            or not context.get("content")
+            or not (context.get("metadata") or {}).get("parent_content")
+        )
+    ]
+    if not backfill_chunk_ids:
+        return contexts
+
+    try:
+        from app.db import get_chunk_repository
+
+        chunk_rows = get_chunk_repository().get_by_ids_with_file_names(backfill_chunk_ids)
+    except Exception as exc:
+        logger.warning("ticket context backfill failed: %s", exc)
+        return contexts
+
+    chunk_map = {
+        str(row.get("chunk_id")): row
+        for row in chunk_rows
+        if isinstance(row, dict) and row.get("chunk_id")
+    }
+    for context in contexts:
+        chunk_id = context.get("chunk_id")
+        if not chunk_id:
+            continue
+        chunk_row = chunk_map.get(str(chunk_id))
+        if not isinstance(chunk_row, dict):
+            continue
+
+        row_metadata = chunk_row.get("metadata") if isinstance(chunk_row.get("metadata"), dict) else {}
+        context_metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+        merged_metadata = dict(row_metadata)
+        merged_metadata.update(context_metadata)
+
+        if not context.get("job_id"):
+            context["job_id"] = chunk_row.get("job_id")
+        if not context.get("file_name"):
+            context["file_name"] = chunk_row.get("file_name") or merged_metadata.get("file_name")
+        if context.get("chunk_index") is None:
+            context["chunk_index"] = chunk_row.get("chunk_index")
+        if not context.get("content"):
+            context["content"] = (
+                chunk_row.get("content")
+                or chunk_row.get("current_content")
+                or chunk_row.get("original_content")
+                or ""
+            )
+        context["metadata"] = merged_metadata
     return contexts
 
 
@@ -1155,6 +1785,64 @@ def _chat_history_from_turns(value: Any) -> List[Dict[str, Any]]:
     return history[-CHAT_HISTORY_LIMIT:]
 
 
+def _history_from_active_ticket(active_ticket: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    clarification = _active_ticket_clarification(active_ticket)
+    history = _existing_chat_history(clarification.get("chat_history"))
+    if not history:
+        history = _chat_history_from_turns(clarification.get("turns"))
+    return history
+
+
+def load_ticket_history_context(
+    session_id: str,
+    active_ticket: Optional[Dict[str, Any]] = None,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    history: List[Dict[str, Any]] = []
+    for item in _load_session_chat_history(session_id):
+        _append_chat_item(history, dict(item))
+    for item in _history_from_active_ticket(active_ticket):
+        _append_chat_item(history, dict(item))
+    return history[-max(int(limit or 0), 0):] if limit else history
+
+
+def _merged_ticket_image_analysis(
+    existing: Dict[str, Any],
+    decision: Dict[str, Any],
+    *,
+    has_image: bool,
+    query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    analysis = dict(existing.get("image_analysis") if isinstance(existing.get("image_analysis"), dict) else {})
+    if has_image:
+        analysis["has_image"] = True
+    elif "has_image" not in analysis:
+        analysis["has_image"] = False
+
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
+
+    if normalized_oss_keys:
+        image_keys = list(analysis.get("image_keys") or [])
+        for key in normalized_oss_keys:
+            if key not in image_keys:
+                image_keys.append(key)
+        analysis["image_keys"] = image_keys
+        analysis["query_image_oss_key"] = normalized_oss_keys[0]
+        analysis["query_image_oss_keys"] = normalized_oss_keys
+
+    field_analysis = decision.get("image_analysis") if isinstance(decision.get("image_analysis"), dict) else None
+    if field_analysis:
+        analysis["field_analysis"] = field_analysis
+        field_analyses = list(analysis.get("field_analyses") or [])
+        field_analyses.append(field_analysis)
+        analysis["field_analyses"] = field_analyses[-10:]
+
+    return analysis
+
+
 def _load_session_chat_history(session_id: str) -> List[Dict[str, Any]]:
     if not session_id:
         return []
@@ -1219,12 +1907,17 @@ def _append_current_turn_to_history(
     answer: str,
     has_image: bool,
     query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     user_item = {"role": "user", "content": query or ""}
+    normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+    if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+        normalized_oss_keys.insert(0, query_image_oss_key)
     if has_image or query_image_oss_key:
         user_item["has_image"] = True
-    if query_image_oss_key:
-        user_item["query_image_oss_key"] = query_image_oss_key
+    if normalized_oss_keys:
+        user_item["query_image_oss_key"] = normalized_oss_keys[0]
+        user_item["query_image_oss_keys"] = normalized_oss_keys
 
     user_idx = _find_recent_chat_item(history, user_item)
     if user_idx < 0:
@@ -1249,6 +1942,7 @@ def _build_ticket_chat_history(
     answer: str,
     has_image: bool,
     query_image_oss_key: Optional[str],
+    query_image_oss_keys: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     existing_history = _existing_chat_history(existing.get("chat_history"))
     if not existing_history:
@@ -1262,6 +1956,7 @@ def _build_ticket_chat_history(
         answer=answer,
         has_image=has_image,
         query_image_oss_key=query_image_oss_key,
+        query_image_oss_keys=query_image_oss_keys,
     )
 
 
@@ -1280,212 +1975,238 @@ def process_ticket_clarification_turn(
     rag_result: Optional[Dict[str, Any]] = None,
     has_image: bool = False,
     query_image_oss_key: Optional[str] = None,
+    query_image_oss_keys: Optional[List[str]] = None,
     continue_only: bool = False,
+    entry_user_id: Optional[str] = None,
+    entry_user_name: Optional[str] = None,
+    entry_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     repo = get_service_ticket_repository()
-    active = repo.find_active_clarification(
-        session_id=session_id,
-        user_id=_normal_ticket_user_id(user_id),
-        kb_name=kb_name,
-    )
-    if continue_only and not active:
-        return None
+    locked_user_id = _normal_ticket_user_id(user_id)
 
-    existing = active.get("clarification") if active else {}
-    existing = existing if isinstance(existing, dict) else {}
-    workflow_payload = workflow or {}
-    decision_fields = decision.get("fields") if isinstance(decision, dict) else {}
-    decision_fields = decision_fields if isinstance(decision_fields, dict) else {}
+    def _run(active: Optional[Dict[str, Any]], conn) -> Optional[Dict[str, Any]]:
+        if continue_only and not active:
+            return None
 
-    existing_intent = str(existing.get("intent_class") or "").upper()
-    incoming_intent = str(decision.get("intent_class") or "").upper()
-    if existing_intent == INTENT_AMBIGUOUS and incoming_intent in {INTENT_OPERATION, INTENT_MISSING_KNOWLEDGE}:
-        intent_class = incoming_intent
-    else:
-        intent_class = str(existing.get("intent_class") or decision.get("intent_class") or INTENT_AMBIGUOUS).upper()
-    if intent_class not in _VALID_INTENTS:
-        intent_class = INTENT_AMBIGUOUS
-    reason = str(existing.get("reason") or decision.get("reason") or "")
-    original_query = str(existing.get("original_query") or query or "")
+        existing = active.get("clarification") if active else {}
+        existing = existing if isinstance(existing, dict) else {}
+        workflow_payload = workflow or {}
+        decision_fields = decision.get("fields") if isinstance(decision, dict) else {}
+        decision_fields = decision_fields if isinstance(decision_fields, dict) else {}
 
-    turns = list(existing.get("turns") or [])
-    current_round = int(active.get("clarification_round") or 0) if active else 0
-    round_no = max(current_round, len(turns)) + 1
+        existing_intent = str(existing.get("intent_class") or "").upper()
+        incoming_intent = str(decision.get("intent_class") or "").upper()
+        if existing_intent == INTENT_AMBIGUOUS and incoming_intent in {INTENT_OPERATION, INTENT_MISSING_KNOWLEDGE}:
+            intent_class = incoming_intent
+        else:
+            intent_class = str(existing.get("intent_class") or decision.get("intent_class") or INTENT_AMBIGUOUS).upper()
+        if intent_class not in _VALID_INTENTS:
+            intent_class = INTENT_AMBIGUOUS
+        reason = str(existing.get("reason") or decision.get("reason") or "")
+        original_query = str(existing.get("original_query") or query or "")
 
-    collected = dict(existing.get("collected") or {})
-    collected.update(decision_fields)
-    if intent_class in {INTENT_OPERATION, INTENT_MISSING_KNOWLEDGE, INTENT_AMBIGUOUS} and not collected.get("issue_detail"):
-        detail = original_query or query or ""
-        if detail:
-            collected["issue_detail"] = detail
-    if has_image:
-        collected["has_image"] = True
-        if query_image_oss_key:
-            image_keys = list(collected.get("image_keys") or [])
-            image_keys.append(query_image_oss_key)
-            collected["image_keys"] = image_keys
+        turns = list(existing.get("turns") or [])
+        current_round = int(active.get("clarification_round") or 0) if active else 0
+        round_no = max(current_round, len(turns)) + 1
 
-    workflow_found = bool(
-        workflow_payload.get("workflow_found")
-        if "workflow_found" in workflow_payload
-        else existing.get("workflow_found")
-    )
-    required_fields = (
-        _as_list(workflow_payload.get("required_fields"))
-        or _as_list(existing.get("required_fields"))
-        or _as_list(decision.get("missing_fields"))
-        or ["issue_detail"]
-    )
-    missing_fields = _collected_missing_fields(required_fields, collected)
+        collected = dict(existing.get("collected") or {})
+        collected.update(decision_fields)
+        if intent_class in {INTENT_OPERATION, INTENT_MISSING_KNOWLEDGE, INTENT_AMBIGUOUS} and not collected.get("issue_detail"):
+            detail = original_query or query or ""
+            if detail:
+                collected["issue_detail"] = detail
+        if has_image:
+            collected["has_image"] = True
+            normalized_oss_keys = [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+            if query_image_oss_key and query_image_oss_key not in normalized_oss_keys:
+                normalized_oss_keys.insert(0, query_image_oss_key)
+            if normalized_oss_keys:
+                image_keys = list(collected.get("image_keys") or [])
+                for key in normalized_oss_keys:
+                    if key not in image_keys:
+                        image_keys.append(key)
+                collected["image_keys"] = image_keys
 
-    workflow_source = str(workflow_payload.get("source") or "")
-    workflow_reason = str(workflow_payload.get("rationale_brief") or "")
-    workflow_analysis_failed = workflow_source == "fallback" and workflow_reason not in {"no_knowledge_candidates"}
-    no_standard_workflow = intent_class == INTENT_OPERATION and not workflow_found and not workflow_analysis_failed
-    operation_fields_complete = intent_class == INTENT_OPERATION and workflow_found and not missing_fields
-    round_limit_reached = round_no >= _round_limit(intent_class)
-    forced_manual = bool(decision.get("ready_for_manual") or decision.get("user_refused"))
-    should_finalize = no_standard_workflow or operation_fields_complete or round_limit_reached or forced_manual
-
-    if no_standard_workflow:
-        exit_reason = EXIT_NO_STANDARD_WORKFLOW
-        completion_status = COMPLETION_INCOMPLETE
-    elif operation_fields_complete:
-        exit_reason = EXIT_FIELDS_COMPLETE
-        completion_status = COMPLETION_COMPLETE
-    elif forced_manual:
-        exit_reason = "user_refused" if decision.get("user_refused") else "ready_for_manual"
-        completion_status = COMPLETION_INCOMPLETE if missing_fields or decision.get("user_refused") else COMPLETION_COMPLETE
-    elif round_limit_reached:
-        exit_reason = _round_limit_exit_reason(intent_class)
-        completion_status = COMPLETION_INCOMPLETE
-    else:
-        exit_reason = ""
-        completion_status = existing.get("completion_status") or COMPLETION_INCOMPLETE
-
-    status = "pending_manual" if should_finalize else "clarifying"
-    answer_ticket_id = active.get("id") if active else None
-    clarification_question = (
-        workflow_payload.get("question")
-        or decision.get("question")
-        or _default_clarification_question(
-            intent_class=intent_class,
-            missing_fields=missing_fields,
-            round_no=round_no,
-            has_image=has_image,
+        workflow_found = bool(
+            workflow_payload.get("workflow_found")
+            if "workflow_found" in workflow_payload
+            else existing.get("workflow_found")
         )
-    )
-    answer = (
-        _manual_ticket_answer(answer_ticket_id, completion_status)
-        if should_finalize
-        else clarification_question
-    )
+        required_fields = (
+            _as_list(workflow_payload.get("required_fields"))
+            or _as_list(existing.get("required_fields"))
+            or _as_list(decision.get("missing_fields"))
+            or ["issue_detail"]
+        )
+        missing_fields = _collected_missing_fields(required_fields, collected)
 
-    turns.append(
-        {
-            "round": round_no,
-            "query": query or "",
-            "answer": answer,
-            "status": status,
-            "image_key": query_image_oss_key,
-        }
-    )
-    chat_history = _build_ticket_chat_history(
-        session_id=session_id,
-        existing=existing,
-        query=query,
-        answer=answer,
-        has_image=has_image,
-        query_image_oss_key=query_image_oss_key,
-    )
+        workflow_source = str(workflow_payload.get("source") or "")
+        workflow_reason = str(workflow_payload.get("rationale_brief") or "")
+        workflow_analysis_failed = workflow_source == "fallback" and workflow_reason not in {"no_knowledge_candidates"}
+        operation_fields_complete = intent_class == INTENT_OPERATION and workflow_found and not missing_fields
+        round_limit_reached = round_no >= _round_limit(intent_class)
+        forced_manual = bool(decision.get("ready_for_manual") or decision.get("user_refused"))
+        should_finalize = operation_fields_complete or round_limit_reached or forced_manual
 
-    clarification = {
-        "intent_class": intent_class,
-        "reason": reason,
-        "original_query": original_query,
-        "required_fields": required_fields,
-        "missing_fields": missing_fields,
-        "collected": collected,
-        "workflow_found": workflow_found,
-        "workflow_summary": workflow_payload.get("workflow_summary") or existing.get("workflow_summary") or "",
-        "workflow_confidence": workflow_payload.get("confidence") if "confidence" in workflow_payload else existing.get("workflow_confidence"),
-        "workflow_rationale": workflow_payload.get("rationale_brief") or existing.get("workflow_rationale") or "",
-        "workflow_source": workflow_payload.get("source") or existing.get("workflow_source") or "",
-        "workflow_sources": _workflow_sources(workflow_payload, existing),
-        "kb_result": existing.get("kb_result") or (rag_result if isinstance(rag_result, dict) else {}),
-        "image_analysis": existing.get("image_analysis")
-        or {"has_image": bool(has_image), "query_image_oss_key": query_image_oss_key},
-        "turns": turns,
-        "chat_history": chat_history,
-        "completion_status": completion_status,
-        "exit_reason": exit_reason,
-        "ready_for_manual": should_finalize,
-    }
+        if operation_fields_complete:
+            exit_reason = EXIT_FIELDS_COMPLETE
+            completion_status = COMPLETION_COMPLETE
+        elif forced_manual:
+            exit_reason = "user_refused" if decision.get("user_refused") else "ready_for_manual"
+            completion_status = COMPLETION_INCOMPLETE if missing_fields or decision.get("user_refused") else COMPLETION_COMPLETE
+        elif round_limit_reached:
+            exit_reason = _round_limit_exit_reason(intent_class)
+            completion_status = COMPLETION_INCOMPLETE
+        else:
+            exit_reason = ""
+            completion_status = existing.get("completion_status") or COMPLETION_INCOMPLETE
 
-    common_update = {
-        "status": status,
-        "answer": answer,
-        "clarification_round": round_no,
-        "clarification": clarification,
-        "sender_id": sender_id,
-        "requester_name": requester_name or user_name,
-    }
-    context_snapshots = _ticket_contexts_from_rag_result(rag_result)
-    if active:
-        ticket = repo.update_clarification(active["id"], **common_update)
-        if context_snapshots:
-            repo.replace_contexts(active["id"], context_snapshots)
-    else:
-        ticket = repo.create_with_contexts(
+        status = "pending_manual" if should_finalize else "clarifying"
+        answer_ticket_id = active.get("id") if active else None
+        clarification_question = (
+            workflow_payload.get("question")
+            or decision.get("question")
+            or _default_clarification_question(
+                intent_class=intent_class,
+                missing_fields=missing_fields,
+                round_no=round_no,
+                has_image=has_image,
+            )
+        )
+        answer = (
+            _manual_ticket_answer(answer_ticket_id, completion_status)
+            if should_finalize
+            else clarification_question
+        )
+
+        turns.append(
+            {
+                "round": round_no,
+                "query": query or "",
+                "answer": answer,
+                "status": status,
+                "image_key": query_image_oss_key,
+                "image_keys": [key for key in (query_image_oss_keys or []) if str(key or "").strip()]
+                or ([query_image_oss_key] if query_image_oss_key else []),
+            }
+        )
+        chat_history = _build_ticket_chat_history(
             session_id=session_id,
-            user_id=_normal_ticket_user_id(user_id),
-            user_name=user_name,
-            kb_name=kb_name,
-            query=original_query,
-            answer=answer,
-            status=status,
-            confidence=0.0,
-            fallback_reason=reason,
-            quality_level="clarifying",
-            sources=(rag_result.get("sources") if isinstance(rag_result, dict) else []),
-            channel=channel or "web",
-            sender_id=sender_id,
-            requester_name=requester_name or user_name,
-            clarification_round=round_no,
-            clarification=clarification,
-            contexts=context_snapshots,
-        )
-
-    if ticket and should_finalize and not answer_ticket_id:
-        answer = _manual_ticket_answer(ticket.get("id"), completion_status)
-        turns[-1]["answer"] = answer
-        clarification["turns"] = turns
-        clarification["chat_history"] = _append_current_turn_to_history(
-            list(clarification.get("chat_history") or []),
+            existing=existing,
             query=query,
             answer=answer,
             has_image=has_image,
             query_image_oss_key=query_image_oss_key,
-        )
-        ticket = repo.update_clarification(
-            ticket["id"],
-            status=status,
-            answer=answer,
-            clarification_round=round_no,
-            clarification=clarification,
-            sender_id=sender_id,
-            requester_name=requester_name or user_name,
+            query_image_oss_keys=query_image_oss_keys,
         )
 
-    return {
-        "ticket_id": ticket.get("id") if ticket else None,
-        "status": status,
-        "answer": answer,
-        "clarification_round": round_no,
-        "clarification": clarification,
-        "confidence": 0.0,
-        "finish_reason": "manual_ticket_created" if should_finalize else "clarification",
-    }
+        clarification = {
+            "intent_class": intent_class,
+            "reason": reason,
+            "original_query": original_query,
+            "required_fields": required_fields,
+            "required_field_details": _workflow_required_field_details(workflow_payload, existing),
+            "missing_fields": missing_fields,
+            "collected": collected,
+            "workflow_found": workflow_found,
+            "workflow_summary": workflow_payload.get("workflow_summary") or existing.get("workflow_summary") or "",
+            "workflow_confidence": workflow_payload.get("confidence") if "confidence" in workflow_payload else existing.get("workflow_confidence"),
+            "workflow_rationale": workflow_payload.get("rationale_brief") or existing.get("workflow_rationale") or "",
+            "workflow_source": workflow_payload.get("source") or existing.get("workflow_source") or "",
+            "workflow_sources": _workflow_sources(workflow_payload, existing),
+            "kb_result": existing.get("kb_result") or (rag_result if isinstance(rag_result, dict) else {}),
+            "image_analysis": _merged_ticket_image_analysis(
+                existing,
+                decision,
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            ),
+            "turns": turns,
+            "chat_history": chat_history,
+            "completion_status": completion_status,
+            "exit_reason": exit_reason,
+            "ready_for_manual": should_finalize,
+        }
+
+        common_update = {
+            "status": status,
+            "answer": answer,
+            "clarification_round": round_no,
+            "clarification": clarification,
+            "sender_id": sender_id,
+            "requester_name": requester_name or user_name,
+            "conn": conn,
+        }
+        context_snapshots = _ticket_contexts_from_rag_result(rag_result)
+        if active:
+            ticket = repo.update_clarification(active["id"], **common_update)
+            if context_snapshots:
+                repo.replace_contexts(active["id"], context_snapshots, conn=conn)
+        else:
+            ticket = repo.create_with_contexts(
+                session_id=session_id,
+                user_id=locked_user_id,
+                user_name=user_name,
+                kb_name=kb_name,
+                query=original_query,
+                answer=answer,
+                status=status,
+                confidence=0.0,
+                fallback_reason=reason,
+                quality_level="clarifying",
+                sources=(rag_result.get("sources") if isinstance(rag_result, dict) else []),
+                channel=channel or "web",
+                sender_id=sender_id,
+                requester_name=requester_name or user_name,
+                entry_user_id=entry_user_id,
+                entry_user_name=entry_user_name,
+                entry_source=entry_source,
+                clarification_round=round_no,
+                clarification=clarification,
+                contexts=context_snapshots,
+                conn=conn,
+            )
+
+        if ticket and should_finalize and not answer_ticket_id:
+            answer = _manual_ticket_answer(ticket.get("id"), completion_status)
+            turns[-1]["answer"] = answer
+            clarification["turns"] = turns
+            clarification["chat_history"] = _append_current_turn_to_history(
+                list(clarification.get("chat_history") or []),
+                query=query,
+                answer=answer,
+                has_image=has_image,
+                query_image_oss_key=query_image_oss_key,
+                query_image_oss_keys=query_image_oss_keys,
+            )
+            ticket = repo.update_clarification(
+                ticket["id"],
+                status=status,
+                answer=answer,
+                clarification_round=round_no,
+                clarification=clarification,
+                sender_id=sender_id,
+                requester_name=requester_name or user_name,
+                conn=conn,
+            )
+
+        return {
+            "ticket_id": ticket.get("id") if ticket else None,
+            "status": status,
+            "answer": answer,
+            "clarification_round": round_no,
+            "clarification": clarification,
+            "confidence": 0.0,
+            "finish_reason": "manual_ticket_created" if should_finalize else "clarification",
+        }
+
+    return repo.run_clarification_transaction(
+        session_id=session_id,
+        user_id=locked_user_id,
+        kb_name=kb_name,
+        callback=_run,
+    )
 
 
 process_clarification_turn = process_ticket_clarification_turn

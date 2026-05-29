@@ -17,6 +17,12 @@ class AuthUserRepository(BaseRepository):
         )
         return self._normalize(rows[0]) if rows else {}
 
+    def list_users(self) -> list[Dict[str, Any]]:
+        rows = self._execute_select(
+            "SELECT * FROM auth_user ORDER BY created_at DESC, username ASC",
+        )
+        return [self._normalize(row) for row in rows]
+
     def get_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         rows = self._execute_select(
             "SELECT * FROM auth_user WHERE username = %s LIMIT 1",
@@ -31,16 +37,33 @@ class AuthUserRepository(BaseRepository):
         )
         return self._normalize(rows[0]) if rows else None
 
-    def update_password(self, *, user_id: str, password_hash: str) -> Optional[Dict[str, Any]]:
-        rows = self._execute_returning(
-            """
-            UPDATE auth_user
-            SET password_hash = %s, updated_at = NOW()
-            WHERE id = %s
-            RETURNING *
-            """,
-            (password_hash, user_id),
-        )
+    def update_password(
+        self,
+        *,
+        user_id: str,
+        password_hash: str,
+        role: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if role is None:
+            rows = self._execute_returning(
+                """
+                UPDATE auth_user
+                SET password_hash = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (password_hash, user_id),
+            )
+        else:
+            rows = self._execute_returning(
+                """
+                UPDATE auth_user
+                SET password_hash = %s, role = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (password_hash, role, user_id),
+            )
         return self._normalize(rows[0]) if rows else None
 
     @staticmethod

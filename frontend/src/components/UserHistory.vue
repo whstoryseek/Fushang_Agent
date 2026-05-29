@@ -383,23 +383,24 @@ onMounted(async () => {
 }
 
 .stat-card {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.96);
+  border: 1px solid rgba(217, 226, 236, 0.92);
   border-radius: 14px;
   padding: 20px 22px;
+  box-shadow: 0 12px 28px rgba(31, 45, 61, 0.06);
 }
 
 .stat-value {
   font-size: 28px;
   line-height: 1;
   font-weight: 700;
-  color: #f4f7ff;
+  color: #4f6478;
 }
 
 .stat-label {
   margin-top: 8px;
   font-size: 12px;
-  color: rgba(255,255,255,0.36);
+  color: #93a2b0;
 }
 
 .toolbar {
@@ -423,10 +424,11 @@ onMounted(async () => {
 
 .session-panel,
 .detail-panel {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.95);
+  border: 1px solid rgba(217, 226, 236, 0.92);
   border-radius: 16px;
   overflow: hidden;
+  box-shadow: 0 18px 36px rgba(31, 45, 61, 0.06);
 }
 
 .session-panel {
@@ -447,12 +449,12 @@ onMounted(async () => {
 .panel-title {
   font-size: 12px;
   font-weight: 600;
-  color: rgba(255,255,255,0.42);
+  color: #7e8f9f;
   letter-spacing: 0.5px;
 }
 
 .panel-empty {
-  color: rgba(255,255,255,0.28);
+  color: #9aa8b5;
   font-size: 13px;
   text-align: center;
   padding: 36px 16px;
@@ -461,8 +463,8 @@ onMounted(async () => {
 .session-card {
   width: 100%;
   text-align: left;
-  border: 1px solid rgba(255,255,255,0.05);
-  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(217, 226, 236, 0.88);
+  background: #fbfcfe;
   border-radius: 12px;
   padding: 12px;
   cursor: pointer;
@@ -470,14 +472,15 @@ onMounted(async () => {
 }
 
 .session-card:hover {
-  background: rgba(255,255,255,0.04);
-  border-color: rgba(126,179,255,0.22);
+  background: #f6faff;
+  border-color: rgba(79, 142, 247, 0.28);
   transform: translateY(-1px);
 }
 
 .session-card.active {
-  background: rgba(79,142,247,0.12);
-  border-color: rgba(79,142,247,0.28);
+  background: #edf5ff;
+  border-color: rgba(79, 142, 247, 0.34);
+  box-shadow: 0 10px 22px rgba(79, 142, 247, 0.1);
 }
 
 .session-row,
@@ -493,7 +496,7 @@ onMounted(async () => {
   flex: 1;
   font-size: 13px;
   font-weight: 600;
-  color: #f3f7ff;
+  color: #566b7f;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -505,7 +508,7 @@ onMounted(async () => {
 .detail-subtitle,
 .message-meta-line {
   font-size: 11px;
-  color: rgba(255,255,255,0.34);
+  color: #9aa8b5;
 }
 
 .session-kb {
@@ -515,7 +518,7 @@ onMounted(async () => {
 .session-preview {
   margin-top: 8px;
   font-size: 12px;
-  color: rgba(255,255,255,0.58);
+  color: #708396;
   line-height: 1.5;
   min-height: 36px;
   display: -webkit-box;
@@ -530,7 +533,7 @@ onMounted(async () => {
 
 .detail-header {
   padding: 18px 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid rgba(217, 226, 236, 0.85);
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -540,7 +543,7 @@ onMounted(async () => {
 .detail-title {
   font-size: 18px;
   font-weight: 700;
-  color: #f4f7ff;
+  color: #516679;
   word-break: break-word;
 }
 
@@ -585,14 +588,15 @@ onMounted(async () => {
   width: 34px;
   height: 34px;
   border-radius: 12px;
-  background: rgba(255,255,255,0.06);
+  background: #f3f7fb;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255,255,255,0.78);
+  color: #718496;
   font-size: 12px;
   font-weight: 700;
   flex-shrink: 0;
+  border: 1px solid rgba(217, 226, 236, 0.88);
 }
 
 .message-body {
@@ -611,16 +615,19 @@ onMounted(async () => {
   padding: 12px 14px;
   line-height: 1.7;
   font-size: 13px;
-  color: rgba(255,255,255,0.88);
-  border: 1px solid rgba(255,255,255,0.05);
+  color: #5d7184;
+  border: 1px solid rgba(217, 226, 236, 0.9);
+  box-shadow: 0 8px 20px rgba(31, 45, 61, 0.06);
 }
 
 .message-bubble.assistant {
-  background: rgba(255,255,255,0.035);
+  background: #ffffff;
 }
 
 .message-bubble.user {
-  background: rgba(79,142,247,0.16);
+  background: linear-gradient(135deg, #edf5ff 0%, #e5f1ff 100%);
+  border-color: rgba(79, 142, 247, 0.22);
+  color: #567086;
 }
 
 .plain-text {
@@ -640,6 +647,7 @@ onMounted(async () => {
 :deep(.message-bubble img) {
   max-width: min(360px, 100%);
   border-radius: 10px;
+  border: 1px solid rgba(217, 226, 236, 0.88);
 }
 
 .query-image {
@@ -647,6 +655,7 @@ onMounted(async () => {
   border-radius: 10px;
   margin-bottom: 8px;
   display: block;
+  border: 1px solid rgba(217, 226, 236, 0.88);
 }
 
 @media (max-width: 980px) {
